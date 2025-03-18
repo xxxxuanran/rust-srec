@@ -1,0 +1,10 @@
+[workspace]
+
+members = ["crates/flv"]
+
+[package]
+name = "rust-srec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
