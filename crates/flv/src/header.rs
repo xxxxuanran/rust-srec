@@ -48,6 +48,19 @@ impl Display for FlvHeader {
 }
 
 impl FlvHeader {
+    /// Parses the FLV header from a byte stream.
+    /// Returns a `FlvHeader` struct if successful, or an error if the header is invalid.
+    /// The function reads the first 9 bytes of the stream and checks for the FLV signature.
+    /// If the signature is not 'FLV', it returns an error.
+    /// The function also checks if the data offset is valid and returns an error if it is not.
+    ///
+    /// This function can return an `io::Error` if buffer is not enough or if the header is invalid.
+    /// Arguments:
+    /// - `reader`: A mutable reference to a `Cursor<Bytes>` that contains the byte stream.
+    /// The reader will be advanced to the end of the header.
+    ///
+    /// The reader needs to be a [`std::io::Cursor`] with a [`Bytes`] buffer because we
+    /// take advantage of zero-copy reading.
     pub fn parse(reader: &mut io::Cursor<Bytes>) -> io::Result<Self> {
         let start = reader.position() as usize;
 
