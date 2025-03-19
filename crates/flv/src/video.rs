@@ -567,6 +567,64 @@ impl VideoTagBody {
     }
 }
 
+impl std::fmt::Display for VideoTagHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VideoTag [{}] {}", self.frame_type, self.body)
+    }
+}
+
+impl std::fmt::Display for VideoFrameType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyFrame => write!(f, "KeyFrame"),
+            Self::InterFrame => write!(f, "InterFrame"),
+            Self::DisposableInterFrame => write!(f, "DisposableInterFrame"),
+            Self::GeneratedKeyFrame => write!(f, "GeneratedKeyFrame"),
+            Self::VideoInfoFrame => write!(f, "VideoInfoFrame"),
+        }
+    }
+}
+
+impl std::fmt::Display for VideoTagBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VideoTagBody::Avc(packet) => write!(f, "AVC {}", packet),
+            VideoTagBody::Hevc(packet) => write!(f, "HEVC {}", packet),
+            VideoTagBody::Enhanced(packet) => write!(f, "{}", packet),
+            VideoTagBody::Command(cmd) => write!(f, "Command: {:?}", cmd),
+            VideoTagBody::Unknown { codec_id, data } => {
+                write!(f, "Unknown Codec: {:?}, {} bytes", codec_id, data.len())
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for EnhancedPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnhancedPacket::Metadata { video_codec, data } => {
+                write!(f, "Metadata [{}] ({} bytes)", video_codec, data.len())
+            }
+            EnhancedPacket::SequenceEnd { video_codec } => {
+                write!(f, "Sequence End [{}]", video_codec)
+            }
+            EnhancedPacket::Av1(packet) => write!(f, "AV1 {}", packet),
+            EnhancedPacket::Hevc(packet) => write!(f, "HEVC {}", packet),
+            EnhancedPacket::Unknown {
+                packet_type,
+                video_codec,
+                data,
+            } => write!(
+                f,
+                "Unknown [{}] Type: {}, {} bytes",
+                video_codec,
+                packet_type,
+                data.len()
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(all(test, coverage_nightly), coverage(off))]
 mod tests {

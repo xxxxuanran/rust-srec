@@ -45,6 +45,41 @@ impl AvcPacket {
     }
 }
 
+impl std::fmt::Display for AvcPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AvcPacket::SequenceHeader(config) => write!(
+                f,
+                "SequenceHeader [Profile: {}, Level: {}, Length: {}]",
+                config.profile_indication, config.profile_compatibility, config.level_indication
+            ),
+            AvcPacket::Nalu {
+                composition_time,
+                data,
+            } => {
+                write!(
+                    f,
+                    "NALU [CTS: {}ms] ({} bytes)",
+                    composition_time,
+                    data.len()
+                )
+            }
+            AvcPacket::EndOfSequence => write!(f, "EndOfSequence"),
+            AvcPacket::Unknown {
+                avc_packet_type,
+                composition_time,
+                data,
+            } => write!(
+                f,
+                "Unknown [Type: {:?}, CTS: {}ms] ({} bytes)",
+                avc_packet_type,
+                composition_time,
+                data.len()
+            ),
+        }
+    }
+}
+
 /// FLV AVC Packet Type
 /// Defined in the FLV specification. Chapter 1 - AVCVIDEODATA
 /// The AVC packet type is used to determine if the video data is a sequence

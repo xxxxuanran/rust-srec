@@ -81,3 +81,48 @@ impl HevcPacket {
         }
     }
 }
+
+impl std::fmt::Display for HevcPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HevcPacket::SequenceStart(config) => write!(
+                f,
+                "SequenceStart [Profile: {}, Level: {}, Tier: {}]",
+                config.general_profile_idc, config.general_level_idc, config.general_tier_flag
+            ),
+            HevcPacket::Nalu {
+                composition_time,
+                data,
+            } => {
+                if let Some(time) = composition_time {
+                    write!(f, "NALU [CTS: {}ms] ({} bytes)", time, data.len())
+                } else {
+                    write!(f, "NALU ({} bytes)", data.len())
+                }
+            }
+            HevcPacket::EndOfSequence => write!(f, "EndOfSequence"),
+            HevcPacket::Unknown {
+                hevc_packet_type,
+                composition_time,
+                data,
+            } => {
+                if let Some(time) = composition_time {
+                    write!(
+                        f,
+                        "Unknown [Type: {:?}, CTS: {}ms] ({} bytes)",
+                        hevc_packet_type,
+                        time,
+                        data.len()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Unknown [Type: {:?}] ({} bytes)",
+                        hevc_packet_type,
+                        data.len()
+                    )
+                }
+            }
+        }
+    }
+}
