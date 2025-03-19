@@ -1,6 +1,14 @@
 [workspace]
 
-members = ["crates/flv"]
+members = [
+    "crates/flv",
+    "crates/aac",
+    "crates/bytes-util",
+    "crates/expgolomb",
+    "crates/av1",
+    "crates/h265",
+    "crates/h265",
+]
 
 [package]
 name = "rust-srec"

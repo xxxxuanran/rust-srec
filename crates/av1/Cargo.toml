@@ -1,0 +1,15 @@
+[package]
+name = "av1"
+version = "0.1.1"
+edition = "2024"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
+[dependencies]
+bytes = "1.10.1"
+byteorder = "1.5"
+bytes-util = { path = "../bytes-util" }
+
+[dev-dependencies]
+insta = "1.42"
