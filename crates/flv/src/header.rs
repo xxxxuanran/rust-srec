@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::io;
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -17,6 +18,33 @@ pub struct FlvHeader {
     pub has_video: bool,
     // Total size of the header, 4 bytes, always 0x09
     pub data_offset: Bytes,
+}
+
+impl Display for FlvHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Convert signature to a string (FLV)
+        let signature_string = format!(
+            "{}{}{}",
+            ((self.signature >> 16) & 0xFF) as u8 as char,
+            ((self.signature >> 8) & 0xFF) as u8 as char,
+            (self.signature & 0xFF) as u8 as char
+        );
+
+        write!(
+            f,
+            "FLV Header: \n\
+            Signature: {}\n\
+            Version: {}\n\
+            Has Audio: {}\n\
+            Has Video: {}\n\
+            Data Offset: {}",
+            signature_string,
+            self.version,
+            self.has_audio,
+            self.has_video,
+            self.data_offset.len()
+        )
+    }
 }
 
 impl FlvHeader {
@@ -41,8 +69,9 @@ impl FlvHeader {
         // Flags is a 1-byte value
         let flags = reader.read_u8()?;
         // Has audio and video flags
-        let has_audio = flags & 0b00000001 != 0;
-        let has_video = flags & 0b00000010 != 0;
+        let has_audio = flags & 0b00000100 != 0;
+        let has_video = flags & 0b00000001 != 0;
+
         // Data offset is a 4-byte value
         let data_offset = reader.read_u32::<BigEndian>()? as usize;
 
@@ -70,40 +99,39 @@ impl FlvHeader {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-    use bytes::{Bytes, BytesMut};
-    use byteorder::{BigEndian, WriteBytesExt};
     use crate::header::FlvHeader;
+    use byteorder::{BigEndian, WriteBytesExt};
+    use bytes::{Bytes, BytesMut};
+    use std::io::Cursor;
 
     #[test]
     fn test_valid_flv_header() {
         // Create a buffer with a valid FLV header
         let mut buffer = BytesMut::new();
-        
+
         // Write "FLV" signature (3 bytes)
         buffer.extend_from_slice(b"FLV");
-        
+
         // Write version (1 byte)
         buffer.extend_from_slice(&[0x01]);
-        
+
         // Write flags (1 byte - both audio and video)
         buffer.extend_from_slice(&[0x03]);
-        
+
         // Write data offset (4 bytes - standard 9)
         let mut offset_bytes = vec![];
         offset_bytes.write_u32::<BigEndian>(9).unwrap();
         buffer.extend_from_slice(&offset_bytes);
-        
+
         // Create a cursor for reading
         let bytes = buffer.freeze();
         let mut reader = Cursor::new(bytes);
-        
+
         // Parse the header
         let header = FlvHeader::parse(&mut reader).unwrap();
-        
+
         // Verify the parsed values
         assert_eq!(header.signature, 0x464C56); // "FLV" in hex
         assert_eq!(header.version, 0x01);
@@ -116,24 +144,24 @@ mod tests {
     fn test_invalid_flv_signature() {
         // Create a buffer with an invalid signature
         let mut buffer = BytesMut::new();
-        
+
         // Write invalid signature "ABC" instead of "FLV"
         buffer.extend_from_slice(b"ABC");
-        
+
         // Add remaining header bytes
         buffer.extend_from_slice(&[0x01, 0x03]);
         let mut offset_bytes = vec![];
         offset_bytes.write_u32::<BigEndian>(9).unwrap();
         buffer.extend_from_slice(&offset_bytes);
-        
+
         // Create a cursor for reading
         let bytes = buffer.freeze();
         let mut reader = Cursor::new(bytes);
-        
+
         // Parse should fail with invalid signature
         let result = FlvHeader::parse(&mut reader);
         assert!(result.is_err());
-        
+
         // Verify reader position is reset to start
         assert_eq!(reader.position(), 0);
     }
@@ -144,16 +172,16 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(b"FLV");
         buffer.extend_from_slice(&[0x01, 0x01]); // Version 1, Audio only flag
-        
+
         let mut offset_bytes = vec![];
         offset_bytes.write_u32::<BigEndian>(9).unwrap();
         buffer.extend_from_slice(&offset_bytes);
-        
+
         let bytes = buffer.freeze();
         let mut reader = Cursor::new(bytes);
-        
+
         let header = FlvHeader::parse(&mut reader).unwrap();
-        
+
         assert!(header.has_audio);
         assert!(!header.has_video);
     }
@@ -164,16 +192,16 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(b"FLV");
         buffer.extend_from_slice(&[0x01, 0x02]); // Version 1, Video only flag
-        
+
         let mut offset_bytes = vec![];
         offset_bytes.write_u32::<BigEndian>(9).unwrap();
         buffer.extend_from_slice(&offset_bytes);
-        
+
         let bytes = buffer.freeze();
         let mut reader = Cursor::new(bytes);
-        
+
         let header = FlvHeader::parse(&mut reader).unwrap();
-        
+
         assert!(!header.has_audio);
         assert!(header.has_video);
     }
@@ -184,15 +212,15 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(b"FLV");
         buffer.extend_from_slice(&[0x01, 0x03]);
-        
+
         // Invalid offset (4 instead of 9)
         let mut offset_bytes = vec![];
         offset_bytes.write_u32::<BigEndian>(4).unwrap();
         buffer.extend_from_slice(&offset_bytes);
-        
+
         let bytes = buffer.freeze();
         let mut reader = Cursor::new(bytes);
-        
+
         // Should still parse but with a warning (current implementation)
         let parse_result = FlvHeader::parse(&mut reader);
         assert!(parse_result.is_err());
