@@ -69,6 +69,8 @@ pub enum Amf0Value<'a> {
     ObjectEnd,
     /// LongString Type defined section 2.14
     LongString(Cow<'a, str>),
+    /// StrictArray Type defined section 2.11
+    StrictArray(Cow<'a, [Amf0Value<'a>]>),
 }
 
 impl Amf0Value<'_> {
@@ -82,6 +84,7 @@ impl Amf0Value<'_> {
             Self::Null => Amf0Marker::Null,
             Self::ObjectEnd => Amf0Marker::ObjectEnd,
             Self::LongString(_) => Amf0Marker::LongString,
+            Self::StrictArray(_) => Amf0Marker::StrictArray,
         }
     }
 
@@ -90,7 +93,14 @@ impl Amf0Value<'_> {
         match self {
             Self::String(s) => Amf0Value::String(Cow::Owned(s.to_string())),
             Self::LongString(s) => Amf0Value::LongString(Cow::Owned(s.to_string())),
-            Self::Object(o) => Amf0Value::Object(o.iter().map(|(k, v)| (Cow::Owned(k.to_string()), v.to_owned())).collect()),
+            Self::Object(o) => Amf0Value::Object(
+                o.iter()
+                    .map(|(k, v)| (Cow::Owned(k.to_string()), v.to_owned()))
+                    .collect(),
+            ),
+            Self::StrictArray(a) => {
+                Amf0Value::StrictArray(a.iter().map(|v| v.to_owned()).collect())
+            }
             Self::Number(n) => Amf0Value::Number(*n),
             Self::Boolean(b) => Amf0Value::Boolean(*b),
             Self::Null => Amf0Value::Null,
@@ -113,12 +123,22 @@ mod tests {
             (Amf0Value::Boolean(true), Amf0Marker::Boolean),
             (Amf0Value::String(Cow::Borrowed("test")), Amf0Marker::String),
             (
-                Amf0Value::Object(Cow::Borrowed(&[(Cow::Borrowed("test"), Amf0Value::Number(1.0))])),
+                Amf0Value::Object(Cow::Borrowed(&[(
+                    Cow::Borrowed("test"),
+                    Amf0Value::Number(1.0),
+                )])),
                 Amf0Marker::Object,
             ),
             (Amf0Value::Null, Amf0Marker::Null),
             (Amf0Value::ObjectEnd, Amf0Marker::ObjectEnd),
-            (Amf0Value::LongString(Cow::Borrowed("test")), Amf0Marker::LongString),
+            (
+                Amf0Value::LongString(Cow::Borrowed("test")),
+                Amf0Marker::LongString,
+            ),
+            (
+                Amf0Value::StrictArray(Cow::Borrowed(&[Amf0Value::Number(1.0)])),
+                Amf0Marker::StrictArray,
+            ),
         ];
 
         for (value, marker) in cases {
@@ -160,6 +180,19 @@ mod tests {
         let value = Amf0Value::ObjectEnd;
         let owned = value.to_owned();
         assert_eq!(owned, Amf0Value::ObjectEnd);
+
+        let value = Amf0Value::StrictArray(Cow::Borrowed(&[
+            Amf0Value::Number(1.0),
+            Amf0Value::String(Cow::Borrowed("test")),
+        ]));
+        let owned = value.to_owned();
+        assert_eq!(
+            owned,
+            Amf0Value::StrictArray(Cow::Owned(vec![
+                Amf0Value::Number(1.0),
+                Amf0Value::String(Cow::Owned("test".to_string()))
+            ]))
+        );
     }
 
     #[test]

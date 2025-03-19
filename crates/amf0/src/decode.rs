@@ -58,13 +58,17 @@ impl<'a> Amf0Decoder<'a> {
             Amf0Marker::Null => Ok(Amf0Value::Null),
             Amf0Marker::EcmaArray => Ok(Amf0Value::Object(self.read_ecma_array()?.into())),
             Amf0Marker::LongString => Ok(Amf0Value::LongString(self.read_long_string()?)),
+            Amf0Marker::StrictArray => Ok(Amf0Value::StrictArray(self.read_strict_array()?.into())),
             _ => Err(Amf0ReadError::UnsupportedType(marker)),
         }
     }
 
     /// Read the next encoded value from the decoder and check if it matches the
     /// specified marker.
-    pub fn decode_with_type(&mut self, specified_marker: Amf0Marker) -> Result<Amf0Value<'a>, Amf0ReadError> {
+    pub fn decode_with_type(
+        &mut self,
+        specified_marker: Amf0Marker,
+    ) -> Result<Amf0Value<'a>, Amf0ReadError> {
         let marker = self.cursor.read_u8()?;
         self.cursor.seek(SeekFrom::Current(-1))?; // seek back to the original position
 
@@ -93,7 +97,10 @@ impl<'a> Amf0Decoder<'a> {
 
     fn is_read_object_eof(&mut self) -> Result<bool, Amf0ReadError> {
         let pos = self.cursor.position();
-        let marker = self.cursor.read_u24::<BigEndian>().map(Amf0Marker::from_u32);
+        let marker = self
+            .cursor
+            .read_u24::<BigEndian>()
+            .map(Amf0Marker::from_u32);
 
         match marker {
             Ok(Some(Amf0Marker::ObjectEnd)) => Ok(true),
@@ -148,6 +155,19 @@ impl<'a> Amf0Decoder<'a> {
         let val = std::str::from_utf8(buff)?;
 
         Ok(Cow::Borrowed(val))
+    }
+
+    fn read_strict_array(&mut self) -> Result<Vec<Amf0Value<'a>>, Amf0ReadError> {
+        let len = self.cursor.read_u32::<BigEndian>()?;
+
+        let mut values = Vec::with_capacity(len as usize);
+
+        for _ in 0..len {
+            let val = self.decode()?;
+            values.push(val);
+        }
+
+        Ok(values)
     }
 }
 
@@ -216,7 +236,10 @@ mod tests {
         let mut amf_reader = Amf0Decoder::new(&amf0_object);
         let value = amf_reader.decode_with_type(Amf0Marker::Object).unwrap();
 
-        assert_eq!(value, Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into()));
+        assert_eq!(
+            value,
+            Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into())
+        );
     }
 
     #[test]
@@ -229,7 +252,36 @@ mod tests {
         let mut amf_reader = Amf0Decoder::new(&amf0_object);
         let value = amf_reader.decode_with_type(Amf0Marker::EcmaArray).unwrap();
 
-        assert_eq!(value, Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into()));
+        assert_eq!(
+            value,
+            Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into())
+        );
+    }
+
+    #[test]
+    fn test_reader_strict_array() {
+        let mut amf0_array = vec![0x0a, 0x00, 0x00, 0x00, 0x03]; // StrictArray marker with 3 elements
+        amf0_array.extend_from_slice(&[0x00]); // Number marker
+        amf0_array.extend_from_slice(&1.0_f64.to_be_bytes());
+        amf0_array.extend_from_slice(&[0x01, 0x01]); // Boolean true
+        amf0_array.extend_from_slice(&[0x02, 0x00, 0x04]); // String with 4 bytes
+        amf0_array.extend_from_slice(b"test");
+
+        let mut amf_reader = Amf0Decoder::new(&amf0_array);
+        let value = amf_reader
+            .decode_with_type(Amf0Marker::StrictArray)
+            .unwrap();
+
+        let expected = Amf0Value::StrictArray(
+            vec![
+                Amf0Value::Number(1.0),
+                Amf0Value::Boolean(true),
+                Amf0Value::String(Cow::Borrowed("test")),
+            ]
+            .into(),
+        );
+
+        assert_eq!(value, expected);
     }
 
     #[test]
@@ -252,7 +304,10 @@ mod tests {
         assert_eq!(values[0], Amf0Value::Number(772.161));
         assert_eq!(values[1], Amf0Value::Boolean(true));
         assert_eq!(values[2], Amf0Value::String(Cow::Borrowed("Hello World")));
-        assert_eq!(values[3], Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into()));
+        assert_eq!(
+            values[3],
+            Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into())
+        );
     }
 
     #[test]
@@ -279,6 +334,9 @@ mod tests {
         let mut amf_reader = Amf0Decoder::new(&amf0_unsupported_marker);
         let result = amf_reader.decode();
 
-        assert!(matches!(result, Err(Amf0ReadError::UnsupportedType(Amf0Marker::Unsupported))));
+        assert!(matches!(
+            result,
+            Err(Amf0ReadError::UnsupportedType(Amf0Marker::Unsupported))
+        ));
     }
 }
