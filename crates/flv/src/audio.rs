@@ -22,7 +22,7 @@
 //! - ScuffleCloud project contributors
 //! - hua0512
 
-use std::io;
+use std::{fmt, io};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
@@ -524,6 +524,128 @@ impl AudioData {
             // read a fixed size
             reader.extract_bytes(size.unwrap())?
         })
+    }
+}
+
+impl fmt::Display for AudioData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.header, self.body)
+    }
+}
+
+impl fmt::Display for AudioHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.sound_format, self.packet)
+    }
+}
+
+impl fmt::Display for SoundFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SoundFormat::Pcm => write!(f, "PCM"),
+            SoundFormat::AdPcm => write!(f, "ADPCM"),
+            SoundFormat::Mp3 => write!(f, "MP3"),
+            SoundFormat::PcmLe => write!(f, "PCM-LE"),
+            SoundFormat::Nellymoser16khzMono => write!(f, "Nellymoser-16kHz-Mono"),
+            SoundFormat::Nellymoser8khzMono => write!(f, "Nellymoser-8kHz-Mono"),
+            SoundFormat::Nellymoser => write!(f, "Nellymoser"),
+            SoundFormat::G711ALaw => write!(f, "G711-A-Law"),
+            SoundFormat::G711MuLaw => write!(f, "G711-Mu-Law"),
+            SoundFormat::ExHeader => write!(f, "Enhanced"),
+            SoundFormat::Aac => write!(f, "AAC"),
+            SoundFormat::Speex => write!(f, "Speex"),
+            SoundFormat::Mp38k => write!(f, "MP3-8kHz"),
+            SoundFormat::DeviceSpecific => write!(f, "DeviceSpecific"),
+        }
+    }
+}
+
+impl fmt::Display for AudioPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioPacket::Legacy(legacy) => write!(
+                f,
+                "Legacy[Rate: {}, Size: {}, Type: {}]",
+                legacy.sound_rate, legacy.sound_size, legacy.sound_type
+            ),
+            AudioPacket::AudioPacketType(apt) => write!(f, "Enhanced[{}]", apt),
+        }
+    }
+}
+
+impl fmt::Display for AudioPacketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioPacketType::SequenceStart => write!(f, "SequenceStart"),
+            AudioPacketType::CodecFrames => write!(f, "CodecFrames"),
+            AudioPacketType::SequenceEnd => write!(f, "SequenceEnd"),
+            AudioPacketType::MultichannelConfig => write!(f, "MultichannelConfig"),
+            AudioPacketType::Multitrack => write!(f, "Multitrack"),
+            AudioPacketType::ModEx => write!(f, "ModEx"),
+        }
+    }
+}
+
+impl fmt::Display for AudioDataBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioDataBody::Aac(packet) => write!(f, "{}", packet),
+            AudioDataBody::Unknown { data } => write!(f, "Unknown[{} bytes]", data.len()),
+        }
+    }
+}
+
+impl fmt::Display for SoundRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SoundRate::Hz5512 => write!(f, "5.5kHz"),
+            SoundRate::Hz11025 => write!(f, "11kHz"),
+            SoundRate::Hz22050 => write!(f, "22kHz"),
+            SoundRate::Hz44100 => write!(f, "44.1kHz"),
+            SoundRate::Hz48000 => write!(f, "48kHz"),
+        }
+    }
+}
+
+impl fmt::Display for SoundSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SoundSize::Bits8 => write!(f, "8-bit"),
+            SoundSize::Bits16 => write!(f, "16-bit"),
+            SoundSize::Bits24 => write!(f, "24-bit"),
+        }
+    }
+}
+
+impl fmt::Display for SoundType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SoundType::Mono => write!(f, "Mono"),
+            SoundType::Stereo => write!(f, "Stereo"),
+        }
+    }
+}
+
+impl fmt::Display for AudioFourCC {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioFourCC::Ac3 => write!(f, "AC-3"),
+            AudioFourCC::Eac3 => write!(f, "E-AC-3"),
+            AudioFourCC::Opus => write!(f, "Opus"),
+            AudioFourCC::Mp3 => write!(f, "MP3"),
+            AudioFourCC::Flac => write!(f, "FLAC"),
+            AudioFourCC::Aac => write!(f, "AAC"),
+        }
+    }
+}
+
+impl fmt::Display for AvMultitrackType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AvMultitrackType::OneTrack => write!(f, "OneTrack"),
+            AvMultitrackType::ManyTracks => write!(f, "ManyTracks"),
+            AvMultitrackType::ManyTracksManyCodecs => write!(f, "ManyTracksManyCodecs"),
+        }
     }
 }
 
