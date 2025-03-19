@@ -1,11 +1,12 @@
-// This 
+// This
 
 use std::io;
 
 use bytes::Bytes;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AacPacketType{
+pub enum AacPacketType {
     /// AAC Sequence Header
     SequenceHeader = 0x00,
     /// AAC Raw
@@ -27,21 +28,16 @@ impl TryFrom<u8> for AacPacketType {
     }
 }
 
-
-
 impl AacPacketType {
     /// Create a new AacPacketType from the given value
     pub fn new(value: u8) -> Option<Self> {
         match value {
             0x00 => Some(AacPacketType::SequenceHeader),
             0x01 => Some(AacPacketType::Raw),
-            _ => None
+            _ => None,
         }
     }
-
 }
-
-
 
 /// AAC Packet
 /// This is a container for aac data.
@@ -54,7 +50,10 @@ pub enum AacPacket {
     /// AAC Raw
     Raw(Bytes),
     /// Data we don't know how to parse
-    Unknown { aac_packet_type: AacPacketType, data: Bytes },
+    Unknown {
+        aac_packet_type: AacPacketType,
+        data: Bytes,
+    },
 }
 
 impl AacPacket {
@@ -64,6 +63,39 @@ impl AacPacket {
             AacPacketType::Raw => AacPacket::Raw(data),
             AacPacketType::SequenceHeader => AacPacket::SequenceHeader(data),
             // _ => AacPacket::Unknown { aac_packet_type, data },
+        }
+    }
+}
+
+impl fmt::Display for AacPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AacPacket::SequenceHeader(data) => {
+                write!(f, "AAC Sequence Header [{} bytes]", data.len())
+            }
+            AacPacket::Raw(data) => {
+                write!(f, "AAC Raw Data [{} bytes]", data.len())
+            }
+            AacPacket::Unknown {
+                aac_packet_type,
+                data,
+            } => {
+                write!(
+                    f,
+                    "Unknown AAC Packet [Type: {}, {} bytes]",
+                    aac_packet_type,
+                    data.len()
+                )
+            }
+        }
+    }
+}
+
+impl fmt::Display for AacPacketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AacPacketType::SequenceHeader => write!(f, "Sequence Header"),
+            AacPacketType::Raw => write!(f, "Raw"),
         }
     }
 }
@@ -133,6 +165,9 @@ mod tests {
         assert_eq!(format!("{:?}", packet_type_3), "Raw");
 
         assert_eq!(AacPacketType::new(0x01).unwrap(), AacPacketType::Raw);
-        assert_eq!(AacPacketType::new(0x00).unwrap(), AacPacketType::SequenceHeader);
+        assert_eq!(
+            AacPacketType::new(0x00).unwrap(),
+            AacPacketType::SequenceHeader
+        );
     }
 }
