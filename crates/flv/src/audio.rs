@@ -1,3 +1,27 @@
+//! # FLV Audio Module
+//!
+//! Implementation of FLV audio tag data parsing following the E-RTMP v2 specification.
+//!
+//! This module handles parsing of audio data from FLV (Flash Video) files, with support
+//! for both legacy and enhanced audio formats.
+//!
+//! ## Specifications
+//!
+//! - [E-RTMP v2 specification](https://github.com/veovera/enhanced-rtmp/blob/main/docs/enhanced/enhanced-rtmp-v2.md#enhanced-audio)
+//!
+//! ## Credits
+//!
+//! Based on the work of [ScuffleCloud project](https://github.com/ScuffleCloud/scuffle/blob/main/crates/flv/src/audio.rs)
+//!
+//! ## License
+//!
+//! MIT License
+//!
+//! ## Authors
+//!
+//! - ScuffleCloud project contributors
+//! - hua0512
+
 use std::io;
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -6,9 +30,12 @@ use bytes_util::BytesCursorExt;
 
 use super::aac::{AacPacket, AacPacketType};
 
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoundFormat {
+    /// Uncompressed PCM audio
     Pcm = 0,
+    /// ADPCM compressed audio
     AdPcm = 1,
     Mp3 = 2,
     PcmLe = 3,
@@ -54,6 +81,7 @@ impl TryFrom<u8> for SoundFormat {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoundRate {
     Hz5512 = 0,
@@ -110,6 +138,7 @@ impl TryFrom<u8> for SoundSize {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoundType {
     Mono = 0,
@@ -164,16 +193,16 @@ impl AudioLegacyPacket {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioHeader {
     // sound format
-    sound_format: SoundFormat,
-    packet: AudioPacket,
+    pub sound_format: SoundFormat,
+    pub packet: AudioPacket,
 }
 
 // Representation of audio data in FLV
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioData {
-    header: AudioHeader,
+    pub header: AudioHeader,
     // Body
-    body: AudioDataBody,
+    pub body: AudioDataBody,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +215,29 @@ pub enum AudioDataBody {
     },
 }
 
+impl AudioDataBody {
+    pub fn demux(
+        sound_format: &SoundFormat,
+        reader: &mut io::Cursor<Bytes>,
+        body_size: Option<usize>,
+    ) -> io::Result<Self> {
+        match sound_format {
+            SoundFormat::Aac => {
+                // For some reason the spec adds a specific byte before the AAC data.
+                // This byte is the AAC packet type.
+                let aac_packet_type = AacPacketType::try_from(reader.read_u8()?)?;
+                Ok(Self::Aac(AacPacket::new(
+                    aac_packet_type,
+                    AudioData::read_remaining(reader, body_size)?,
+                )))
+            }
+            _ => Ok(Self::Unknown {
+                data: AudioData::read_remaining(reader, body_size)?,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioPacket {
     // Legacy audio packet, this is the default
@@ -195,6 +247,7 @@ pub enum AudioPacket {
 }
 
 // New in E-RTMP v2, Audio Packet Type
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioPacketType {
     SequenceStart = 0,
@@ -247,6 +300,7 @@ impl TryFrom<u8> for AudioPacketModExType {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 // New in E-RTMP v2, Audio FourCC
 pub enum AudioFourCC {
@@ -288,6 +342,7 @@ impl AudioFourCC {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AvMultitrackType {
     OneTrack = 0,
@@ -314,7 +369,23 @@ impl TryFrom<u8> for AvMultitrackType {
 }
 
 impl AudioData {
-    pub fn parse(reader: &mut io::Cursor<Bytes>, body_size: usize) -> io::Result<Self> {
+    /// Parses audio data from an FLV tag
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - A cursor positioned at the start of the audio data
+    /// * `body_size` - The expected size of the audio data in bytes, or None to read all available data
+    ///
+    /// # Returns
+    ///
+    /// An `AudioData` structure containing the parsed header and body data
+    ///
+    /// # Errors
+    ///
+    /// Returns an `io::Error` if:
+    /// * Reading from the cursor fails
+    /// * The data format is invalid or unsupported
+    pub fn parse(reader: &mut io::Cursor<Bytes>, body_size: Option<usize>) -> io::Result<Self> {
         let start = reader.position() as usize;
 
         // Read the first byte to get the sound format
@@ -431,19 +502,7 @@ impl AudioData {
         };
 
         // read the body
-        let body = match sound_format {
-            SoundFormat::Aac => {
-                // Read the AAC packet type
-                let aac_packet_type = AacPacketType::try_from(reader.read_u8()?)?;
-                AudioDataBody::Aac(AacPacket::new(
-                    aac_packet_type,
-                    AudioData::read_remaining(reader, body_size)?,
-                ))
-            }
-            _ => AudioDataBody::Unknown {
-                data: AudioData::read_remaining(reader, body_size)?,
-            },
-        };
+        let body = AudioDataBody::demux(&sound_format, reader, body_size)?;
 
         // flv audio header
         let audio_header = AudioHeader {
@@ -457,13 +516,13 @@ impl AudioData {
         })
     }
 
-    fn read_remaining(reader: &mut io::Cursor<Bytes>, size: usize) -> io::Result<Bytes> {
-        Ok(if size == 0 {
+    fn read_remaining(reader: &mut io::Cursor<Bytes>, size: Option<usize>) -> io::Result<Bytes> {
+        Ok(if size == None || size.unwrap() == 0 {
             // if size is 0, read until the end of the stream
             reader.extract_remaining()
         } else {
             // read a fixed size
-            reader.extract_bytes(size)?
+            reader.extract_bytes(size.unwrap())?
         })
     }
 }
@@ -474,14 +533,12 @@ mod tests {
 
     use bytes::{BufMut, BytesMut};
 
-    use crate::aac;
-
     use super::*;
 
     #[test]
     fn test_parse_aac_audio_packet() {
         let mut reader = io::Cursor::new(Bytes::from(vec![0b10101101, 0b00000000, 1, 2, 3]));
-        let audio_data = AudioData::parse(&mut reader, 0).unwrap();
+        let audio_data = AudioData::parse(&mut reader, None).unwrap();
 
         assert_eq!(audio_data.header.sound_format, SoundFormat::Aac);
         match &audio_data.header.packet {
@@ -492,15 +549,6 @@ mod tests {
             }
             _ => panic!("Expected Legacy packet"),
         }
-        // match &audio_data.body {
-        //     AudioDataBody::Aac(aac) => {
-        //         assert_eq!(aac.aac_packet_type, AacPacketType::SequenceHeader);
-        //         assert_eq!(aac.data.len(), 2);
-        //         assert_eq!(aac.data[0], 0x12);
-        //         assert_eq!(aac.data[1], 0x34);
-        //     }
-        //     _ => panic!("Expected AAC packet"),
-        // }
     }
 
     #[test]
@@ -513,7 +561,7 @@ mod tests {
         bytes.put_u8(0xCD);
 
         let mut cursor = Cursor::new(bytes.freeze());
-        let audio_data = AudioData::parse(&mut cursor, 0).unwrap();
+        let audio_data = AudioData::parse(&mut cursor, None).unwrap();
 
         assert_eq!(audio_data.header.sound_format, SoundFormat::Mp3);
         match &audio_data.header.packet {
@@ -543,7 +591,7 @@ mod tests {
         bytes.put_u8(0x04);
 
         let mut cursor = Cursor::new(bytes.freeze());
-        let result = AudioData::read_remaining(&mut cursor, 2).unwrap();
+        let result = AudioData::read_remaining(&mut cursor, Some(2)).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], 0x01);
@@ -559,7 +607,7 @@ mod tests {
         bytes.put_u8(0x03);
 
         let mut cursor = Cursor::new(bytes.freeze());
-        let result = AudioData::read_remaining(&mut cursor, 0).unwrap();
+        let result = AudioData::read_remaining(&mut cursor, None).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], 0x01);
