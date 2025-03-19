@@ -1,5 +1,7 @@
+use std::fmt;
+
 use byteorder::{BigEndian, ReadBytesExt};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use bytes_util::BytesCursorExt;
 
 use super::audio::AudioData;
@@ -40,9 +42,26 @@ impl FlvTag {
     /// The reader needs to be a [`std::io::Cursor`] with a [`Bytes`] buffer because we
     /// take advantage of zero-copy reading.
     pub fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<Self> {
+        // let position = reader.position() as usize;
         let tag_type = FlvTagType::from(reader.read_u8()?);
 
         let data_size = reader.read_u24::<BigEndian>()?;
+
+        // check if we have the correct amount of bytes to read
+        if reader.remaining() < data_size as usize {
+            // set the position back to the start of the tag
+            // reader.set_position(position as u64);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Not enough bytes to read for tag type {}. Expected {} bytes, got {} bytes",
+                    tag_type,
+                    data_size,
+                    reader.remaining()
+                ),
+            ));
+        }
+
         // The timestamp bit is weird. Its 24bits but then there is an extended 8 bit
         // number to create a 32bit number.
         let timestamp_ms = reader.read_u24::<BigEndian>()? | ((reader.read_u8()? as u32) << 24);
@@ -62,6 +81,16 @@ impl FlvTag {
             stream_id,
             data,
         })
+    }
+}
+
+impl fmt::Display for FlvTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "FlvTag [Time: {}ms, Stream: {}] {}",
+            self.timestamp_ms, self.stream_id, self.data
+        )
     }
 }
 
@@ -94,6 +123,17 @@ impl From<u8> for FlvTagType {
             9 => FlvTagType::Video,
             18 => FlvTagType::ScriptData,
             _ => FlvTagType::Unknown(value),
+        }
+    }
+}
+
+impl fmt::Display for FlvTagType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlvTagType::Audio => write!(f, "Audio"),
+            FlvTagType::Video => write!(f, "Video"),
+            FlvTagType::ScriptData => write!(f, "Script"),
+            FlvTagType::Unknown(value) => write!(f, "Unknown({})", value),
         }
     }
 }
@@ -147,6 +187,19 @@ impl FlvTagData {
                 tag_type,
                 data: reader.extract_remaining(),
             }),
+        }
+    }
+}
+
+impl fmt::Display for FlvTagData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlvTagData::Audio(audio) => write!(f, "Audio: {}", audio),
+            FlvTagData::Video(video) => write!(f, "Video: {}", video),
+            FlvTagData::ScriptData(script) => write!(f, "Script: {}", script),
+            FlvTagData::Unknown { tag_type, data } => {
+                write!(f, "Unknown (type: {:?}, {} bytes)", tag_type, data.len())
+            }
         }
     }
 }
