@@ -385,7 +385,7 @@ impl AudioData {
     /// Returns an `io::Error` if:
     /// * Reading from the cursor fails
     /// * The data format is invalid or unsupported
-    pub fn parse(reader: &mut io::Cursor<Bytes>, body_size: Option<usize>) -> io::Result<Self> {
+    pub fn demux(reader: &mut io::Cursor<Bytes>, body_size: Option<usize>) -> io::Result<Self> {
         let start = reader.position() as usize;
 
         // Read the first byte to get the sound format
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn test_parse_aac_audio_packet() {
         let mut reader = io::Cursor::new(Bytes::from(vec![0b10101101, 0b00000000, 1, 2, 3]));
-        let audio_data = AudioData::parse(&mut reader, None).unwrap();
+        let audio_data = AudioData::demux(&mut reader, None).unwrap();
 
         assert_eq!(audio_data.header.sound_format, SoundFormat::Aac);
         match &audio_data.header.packet {
@@ -561,7 +561,7 @@ mod tests {
         bytes.put_u8(0xCD);
 
         let mut cursor = Cursor::new(bytes.freeze());
-        let audio_data = AudioData::parse(&mut cursor, None).unwrap();
+        let audio_data = AudioData::demux(&mut cursor, None).unwrap();
 
         assert_eq!(audio_data.header.sound_format, SoundFormat::Mp3);
         match &audio_data.header.packet {

@@ -2,6 +2,7 @@ mod aac;
 mod audio;
 mod av1;
 mod avc;
+mod file;
 mod header;
 mod hevc;
 mod parser;
