@@ -54,7 +54,7 @@
 //! - ScuffleCloud project contributors
 //! - hua0512
 
-use std::io;
+use std::{fmt, io};
 
 use amf0::{Amf0Decoder, Amf0Marker, Amf0Value};
 use bytes::Bytes;
@@ -85,12 +85,18 @@ impl ScriptData {
 
         let data = amf0_reader
             .decode_all()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid script data"))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         Ok(Self {
             name: name.into_owned(),
             data: data.into_iter().map(|v| v.to_owned()).collect(),
         })
+    }
+}
+
+impl fmt::Display for ScriptData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} values", self.data.len())
     }
 }
 
