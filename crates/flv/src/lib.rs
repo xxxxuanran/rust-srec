@@ -5,5 +5,6 @@ mod avc;
 mod header;
 mod hevc;
 mod parser;
+mod script;
 mod tag;
 mod video;
