@@ -5,7 +5,7 @@ use bytes::Bytes;
 use bytes_util::BytesCursorExt;
 use h265::HEVCDecoderConfigurationRecord;
 
-
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum HevcPacketType {
     /// HEVC Sequence Header
@@ -14,8 +14,9 @@ pub enum HevcPacketType {
     Nalu = 1,
     /// HEVC End of Sequence
     EndOfSequence = 2,
-}
 
+    Unknown(u8),
+}
 
 impl TryFrom<u8> for HevcPacketType {
     type Error = io::Error;
@@ -25,15 +26,10 @@ impl TryFrom<u8> for HevcPacketType {
             0 => Ok(Self::SeqHdr),
             1 => Ok(Self::Nalu),
             2 => Ok(Self::EndOfSequence),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid HEVC packet type: {}", value),
-            )),
+            _ => Ok(Self::Unknown(value)),
         }
     }
 }
-
-
 
 /// HEVC Packet
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +37,10 @@ pub enum HevcPacket {
     /// HEVC Sequence Start
     SequenceStart(HEVCDecoderConfigurationRecord),
     /// HEVC NALU
-    Nalu { composition_time: Option<i32>, data: Bytes },
+    Nalu {
+        composition_time: Option<i32>,
+        data: Bytes,
+    },
 
     /// HEVC End of Sequence
     /// End of Sequence

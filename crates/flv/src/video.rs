@@ -364,17 +364,17 @@ pub struct EnhancedPacketType(pub u8);
 
 impl EnhancedPacketType {
     /// Sequence Start
-    pub const SequenceStart: Self = Self(0);
+    pub const SEQUENCE_START: Self = Self(0);
     /// Coded Frames
-    pub const CodedFrames: Self = Self(1);
+    pub const CODED_FRAMES: Self = Self(1);
     /// Sequence End
-    pub const SequenceEnd: Self = Self(2);
+    pub const SEQUENCE_END: Self = Self(2);
     /// Coded Frames X
-    pub const CodedFramesX: Self = Self(3);
+    pub const CODED_FRAMES_X: Self = Self(3);
     /// Metadata
-    pub const Metadata: Self = Self(4);
+    pub const METADATA: Self = Self(4);
     /// MPEG-2 Sequence Start
-    pub const Mpeg2SequenceStart: Self = Self(5);
+    pub const MPEG2_SEQUENCE_START: Self = Self(5);
 }
 
 impl From<u8> for EnhancedPacketType {
@@ -479,12 +479,12 @@ impl VideoTagBody {
                 let video_codec = VideoFourCC::from(video_codec);
 
                 match packet_type {
-                    EnhancedPacketType::SequenceEnd => {
+                    EnhancedPacketType::SEQUENCE_END => {
                         return Ok(VideoTagBody::Enhanced(EnhancedPacket::SequenceEnd {
                             video_codec,
                         }));
                     }
-                    EnhancedPacketType::Metadata => {
+                    EnhancedPacketType::METADATA => {
                         return Ok(VideoTagBody::Enhanced(EnhancedPacket::Metadata {
                             video_codec,
                             data: reader.extract_remaining(),
@@ -497,60 +497,60 @@ impl VideoTagBody {
                 println!("Packet type: {:?}", packet_type);
 
                 match (video_codec, packet_type) {
-                    (VideoFourCC::Avc1, EnhancedPacketType::SequenceStart) => {
+                    (VideoFourCC::Avc1, EnhancedPacketType::SEQUENCE_START) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Av1(
                             Av1Packet::SequenceStart(AV1CodecConfigurationRecord::demux(reader)?),
                         )))
                     }
-                    (VideoFourCC::Avc1, EnhancedPacketType::Mpeg2SequenceStart) => Ok(
+                    (VideoFourCC::Avc1, EnhancedPacketType::MPEG2_SEQUENCE_START) => Ok(
                         VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::SequenceStart(
                             AV1VideoDescriptor::demux(reader)?.codec_configuration_record,
                         ))),
                     ),
-                    (VideoFourCC::Avc1, EnhancedPacketType::CodedFrames) => {
+                    (VideoFourCC::Avc1, EnhancedPacketType::CODED_FRAMES) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::Raw(
                             reader.extract_remaining(),
                         ))))
                     }
-                    (VideoFourCC::Hvc1, EnhancedPacketType::SequenceStart) => Ok(
+                    (VideoFourCC::Hvc1, EnhancedPacketType::SEQUENCE_START) => Ok(
                         VideoTagBody::Enhanced(EnhancedPacket::Hevc(HevcPacket::SequenceStart(
                             HEVCDecoderConfigurationRecord::demux(reader)?,
                         ))),
                     ),
-                    (VideoFourCC::Hvc1, EnhancedPacketType::CodedFrames) => Ok(
+                    (VideoFourCC::Hvc1, EnhancedPacketType::CODED_FRAMES) => Ok(
                         VideoTagBody::Enhanced(EnhancedPacket::Hevc(HevcPacket::Nalu {
                             composition_time: Some(reader.read_i24::<BigEndian>()?),
                             data: reader.extract_remaining(),
                         })),
                     ),
-                    (VideoFourCC::Hvc1, EnhancedPacketType::CodedFramesX) => Ok(
+                    (VideoFourCC::Hvc1, EnhancedPacketType::CODED_FRAMES_X) => Ok(
                         VideoTagBody::Enhanced(EnhancedPacket::Hevc(HevcPacket::Nalu {
                             composition_time: None,
                             data: reader.extract_remaining(),
                         })),
                     ),
-                    (VideoFourCC::Av01, EnhancedPacketType::SequenceStart) => {
+                    (VideoFourCC::Av01, EnhancedPacketType::SEQUENCE_START) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Av1(
                             Av1Packet::SequenceStart(AV1CodecConfigurationRecord::demux(reader)?),
                         )))
                     }
-                    (VideoFourCC::Av01, EnhancedPacketType::CodedFrames) => {
+                    (VideoFourCC::Av01, EnhancedPacketType::CODED_FRAMES) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::Raw(
                             reader.extract_remaining(),
                         ))))
                     }
-                    (VideoFourCC::Av01, EnhancedPacketType::CodedFramesX) => {
+                    (VideoFourCC::Av01, EnhancedPacketType::CODED_FRAMES_X) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::Raw(
                             reader.extract_remaining(),
                         ))))
                     }
-                    (VideoFourCC::Av01, EnhancedPacketType::Metadata) => {
+                    (VideoFourCC::Av01, EnhancedPacketType::METADATA) => {
                         Ok(VideoTagBody::Enhanced(EnhancedPacket::Metadata {
                             video_codec,
                             data: reader.extract_remaining(),
                         }))
                     }
-                    (VideoFourCC::Av01, EnhancedPacketType::Mpeg2SequenceStart) => Ok(
+                    (VideoFourCC::Av01, EnhancedPacketType::MPEG2_SEQUENCE_START) => Ok(
                         VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::SequenceStart(
                             AV1VideoDescriptor::demux(reader)?.codec_configuration_record,
                         ))),
@@ -591,13 +591,13 @@ mod tests {
     #[test]
     fn test_enhanced_packet_type() {
         let cases = [
-            (EnhancedPacketType::SequenceStart, 0, "SequenceStart"),
-            (EnhancedPacketType::CodedFrames, 1, "CodedFrames"),
-            (EnhancedPacketType::SequenceEnd, 2, "SequenceEnd"),
-            (EnhancedPacketType::CodedFramesX, 3, "CodedFramesX"),
-            (EnhancedPacketType::Metadata, 4, "Metadata"),
+            (EnhancedPacketType::SEQUENCE_START, 0, "SequenceStart"),
+            (EnhancedPacketType::CODED_FRAMES, 1, "CodedFrames"),
+            (EnhancedPacketType::SEQUENCE_END, 2, "SequenceEnd"),
+            (EnhancedPacketType::CODED_FRAMES_X, 3, "CodedFramesX"),
+            (EnhancedPacketType::METADATA, 4, "Metadata"),
             (
-                EnhancedPacketType::Mpeg2SequenceStart,
+                EnhancedPacketType::MPEG2_SEQUENCE_START,
                 5,
                 "Mpeg2SequenceStart",
             ),
@@ -706,7 +706,7 @@ mod tests {
             (
                 1,
                 true,
-                VideoPacketType::Enhanced(EnhancedPacketType::CodedFrames),
+                VideoPacketType::Enhanced(EnhancedPacketType::CODED_FRAMES),
             ),
             (7, false, VideoPacketType::CodecId(VideoCodecId::Avc)),
         ];
@@ -843,5 +843,46 @@ mod tests {
                 ))),
             }
         );
+    }
+
+    #[test]
+    fn test_legacy_hevc_parsing() {
+        // Test 1: NALU packet (type 1) - should have composition time
+        let mut reader = io::Cursor::new(Bytes::from_static(&[
+            // HEVC packet type 1 (NALU)
+            0x01, // Composition time offset (0x001234)
+            0x00, 0x12, 0x34, // Some fake HEVC NALU data
+            0x40, 0x01, 0x0c, 0x01, 0x77,
+        ]));
+
+        // Create packet type for legacy HEVC
+        let packet_type = VideoPacketType::CodecId(VideoCodecId::LegacyHevc);
+
+        // Parse the data
+        let body = VideoTagBody::demux(packet_type, &mut reader).unwrap();
+
+        // Verify the parsed data
+        assert_eq!(
+            body,
+            VideoTagBody::Hevc(HevcPacket::Nalu {
+                composition_time: Some(0x001234),
+                data: Bytes::from_static(&[0x40, 0x01, 0x0c, 0x01, 0x77]),
+            })
+        );
+
+        // Test 2: End of sequence packet (type 2)
+        let mut reader = io::Cursor::new(Bytes::from_static(&[
+            // HEVC packet type 2 (end of sequence)
+            0x02,
+        ]));
+
+        // Create packet type for legacy HEVC
+        let packet_type = VideoPacketType::CodecId(VideoCodecId::LegacyHevc);
+
+        // Parse the data
+        let body = VideoTagBody::demux(packet_type, &mut reader).unwrap();
+
+        // Verify the parsed data
+        assert_eq!(body, VideoTagBody::Hevc(HevcPacket::EndOfSequence));
     }
 }

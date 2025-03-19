@@ -1,9 +1,9 @@
-mod video;
-mod audio;
-mod tag;
-mod header;
-mod parser;
 mod aac;
-mod avc;
+mod audio;
 mod av1;
+mod avc;
+mod header;
 mod hevc;
+mod parser;
+mod tag;
+mod video;

@@ -163,13 +163,13 @@ impl TryFrom<u8> for SoundType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct AudioLegacyPacket {
+pub struct AudioLegacyPacket {
     // bit 3-2
-    sound_rate: SoundRate,
+    pub sound_rate: SoundRate,
     // bit 1
-    sound_size: SoundSize,
+    pub sound_size: SoundSize,
     // bit 0
-    sound_type: SoundType,
+    pub sound_type: SoundType,
 }
 
 impl AudioLegacyPacket {
@@ -418,7 +418,7 @@ impl AudioData {
                             };
 
                             // Fetch the packet ModEx data based on its determined size
-                            let mut mod_ex_data = reader.extract_bytes(mod_ex_data_size)?;
+                            let mod_ex_data = reader.extract_bytes(mod_ex_data_size)?;
 
                             // Fetch the AudioPacketModExType
                             let next_byte = reader.read_u8()?;
