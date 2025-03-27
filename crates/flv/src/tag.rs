@@ -1,12 +1,15 @@
 use std::fmt;
+use std::sync::Arc;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, Bytes};
 use bytes_util::BytesCursorExt;
 
+use crate::video::{EnhancedPacketType, VideoFrameType, VideoPacketType};
+
 use super::audio::AudioData;
 use super::script::ScriptData;
-use super::video::VideoTagHeader;
+use super::video::VideoData;
 
 /// An FLV Tag
 ///
@@ -26,7 +29,7 @@ use super::video::VideoTagHeader;
 /// dont support), and therefore the [`FlvTagData::Unknown`] variant will be
 /// used.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlvTag {
+pub struct FlvTagOwned {
     /// A timestamp in milliseconds
     pub timestamp_ms: u32,
     /// A stream id
@@ -34,15 +37,43 @@ pub struct FlvTag {
     pub data: FlvTagData,
 }
 
-impl FlvTag {
+/// An FLV Tag with an Bytes buffer
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlvTag {
+    /// A timestamp in milliseconds
+    pub timestamp_ms: u32,
+    /// A stream id
+    pub stream_id: u32,
+    /// The type of the tag
+    pub tag_type: FlvTagType,
+    /// Copy free buffer
+    pub data: Bytes,
+}
+
+pub trait FlvUtil<T> {
+    fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<T>;
+
+    fn is_script_tag(&self) -> bool;
+
+    fn is_audio_tag(&self) -> bool;
+
+    fn is_video_tag(&self) -> bool;
+
+    fn is_key_frame(&self) -> bool;
+
+    fn is_video_sequence_header(&self) -> bool;
+
+    fn is_audio_sequence_header(&self) -> bool;
+}
+
+impl FlvUtil<FlvTagOwned> for FlvTagOwned {
     /// Demux a FLV tag from the given reader.
     ///
     /// The reader will be advanced to the end of the tag.
     ///
     /// The reader needs to be a [`std::io::Cursor`] with a [`Bytes`] buffer because we
     /// take advantage of zero-copy reading.
-    pub fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<Self> {
-        // let position = reader.position() as usize;
+    fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<Self> {
         let tag_type = FlvTagType::from(reader.read_u8()?);
 
         let data_size = reader.read_u24::<BigEndian>()?;
@@ -50,7 +81,6 @@ impl FlvTag {
         // check if we have the correct amount of bytes to read
         if reader.remaining() < data_size as usize {
             // set the position back to the start of the tag
-            // reader.set_position(position as u64);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!(
@@ -76,21 +106,231 @@ impl FlvTag {
         // Finally we demux the data.
         let data = FlvTagData::demux(tag_type, &mut std::io::Cursor::new(data))?;
 
-        Ok(FlvTag {
+        Ok(FlvTagOwned {
             timestamp_ms,
             stream_id,
             data,
         })
     }
+
+    fn is_script_tag(&self) -> bool {
+        matches!(self.data, FlvTagData::ScriptData(_))
+    }
+
+    fn is_audio_tag(&self) -> bool {
+        matches!(self.data, FlvTagData::Audio(_))
+    }
+
+    fn is_video_tag(&self) -> bool {
+        matches!(self.data, FlvTagData::Video(_))
+    }
+
+    fn is_key_frame(&self) -> bool {
+        match self.data {
+            FlvTagData::Video(ref video_data) => {
+                if video_data.frame_type == VideoFrameType::KeyFrame {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn is_video_sequence_header(&self) -> bool {
+        match self.data {
+            FlvTagData::Video(ref video_data) => video_data.body.is_sequence_header(),
+            _ => false,
+        }
+    }
+
+    fn is_audio_sequence_header(&self) -> bool {
+        match self.data {
+            FlvTagData::Audio(ref audio_data) => audio_data.body.is_sequence_header(),
+            _ => false,
+        }
+    }
 }
 
-impl fmt::Display for FlvTag {
+impl FlvUtil<FlvTag> for FlvTag {
+    fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<FlvTag> {
+        {
+            let tag_type = FlvTagType::from(reader.read_u8()?);
+
+            let data_size = reader.read_u24::<BigEndian>()?;
+
+            // check if we have the correct amount of bytes to read
+            if reader.remaining() < data_size as usize {
+                // set the position back to the start of the tag
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "Not enough bytes to read for tag type {}. Expected {} bytes, got {} bytes",
+                        tag_type,
+                        data_size,
+                        reader.remaining()
+                    ),
+                ));
+            }
+
+            // The timestamp bit is weird. Its 24bits but then there is an extended 8 bit
+            // number to create a 32bit number.
+            let timestamp_ms = reader.read_u24::<BigEndian>()? | ((reader.read_u8()? as u32) << 24);
+
+            // The stream id according to the spec is ALWAYS 0. (likely not true)
+            let stream_id = reader.read_u24::<BigEndian>()?;
+
+            // We then extract the data from the reader. (advancing the cursor to the end of
+            // the tag)
+            let data = reader.extract_bytes(data_size as usize)?;
+
+            Ok(FlvTag {
+                timestamp_ms,
+                stream_id,
+                tag_type,
+                // Bytes is a copy free buffer
+                data,
+            })
+        }
+    }
+
+    fn is_script_tag(&self) -> bool {
+        matches!(self.tag_type, FlvTagType::ScriptData)
+    }
+
+    fn is_audio_tag(&self) -> bool {
+        matches!(self.tag_type, FlvTagType::Audio)
+    }
+
+    fn is_video_tag(&self) -> bool {
+        matches!(self.tag_type, FlvTagType::Video)
+    }
+
+    fn is_key_frame(&self) -> bool {
+        match self.tag_type {
+            FlvTagType::Video => {
+                if self.data.is_empty() {
+                    return false;
+                }
+
+                let bytes = self.data.as_ref();
+                let first_byte = bytes[0];
+
+                // Check if this is an enhanced type
+                let enhanced = (first_byte & 0b1000_0000) != 0;
+
+                // For both legacy and enhanced, frame type is in bits 4-7
+                let frame_type = (first_byte >> 4) & 0x07;
+
+                // VideoFrameType::KeyFrame = 1
+                frame_type == VideoFrameType::KeyFrame as u8
+            }
+            _ => false,
+        }
+    }
+
+    fn is_video_sequence_header(&self) -> bool {
+        match self.tag_type {
+            FlvTagType::Video => {
+                let bytes = self.data.as_ref();
+                // peek the first byte
+                let enhanced = (bytes[0] & 0b1000_0000) != 0;
+                // for legacy formats, we detect the sequence header by checking the packet type
+                if !enhanced {
+                    let video_packet_type = bytes.get(1).unwrap_or(&0) & 0x0F;
+                    return video_packet_type == 0x0;
+                } else {
+                    let video_packet_type = bytes.get(0).unwrap_or(&0) & 0x0F;
+                    let video_packet_type = VideoPacketType::new(video_packet_type, enhanced);
+                    match video_packet_type {
+                        VideoPacketType::Enhanced(packet) => {
+                            return packet == EnhancedPacketType::SEQUENCE_START;
+                        }
+                        _ => false,
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn is_audio_sequence_header(&self) -> bool {
+        match self.tag_type {
+            FlvTagType::Audio => {
+                let bytes = self.data.as_ref();
+                // For audio tags, the sequence header is indicated by
+                // the second byte being 0 in AAC format audio packets
+                if bytes.len() < 2 {
+                    return false;
+                }
+
+                let sound_format = (bytes[0] >> 4) & 0xF;
+
+                // If it's AAC (10), check for sequence header
+                if sound_format == 10 && bytes.len() > 1 {
+                    // AAC packet type is at offset 1
+                    // 0 = AAC sequence header
+                    return bytes[1] == 0;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for FlvTagOwned {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "FlvTag [Time: {}ms, Stream: {}] {}",
             self.timestamp_ms, self.stream_id, self.data
         )
+    }
+}
+
+impl FlvTag {
+    pub fn demux(reader: &mut std::io::Cursor<Bytes>) -> std::io::Result<FlvTag> {
+        let tag_type = FlvTagType::from(reader.read_u8()?);
+
+        let data_size = reader.read_u24::<BigEndian>()?;
+
+        // check if we have the correct amount of bytes to read
+        if reader.remaining() < data_size as usize {
+            // set the position back to the start of the tag
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Not enough bytes to read for tag type {}. Expected {} bytes, got {} bytes",
+                    tag_type,
+                    data_size,
+                    reader.remaining()
+                ),
+            ));
+        }
+
+        // The timestamp bit is weird. Its 24bits but then there is an extended 8 bit
+        // number to create a 32bit number.
+        let timestamp_ms = reader.read_u24::<BigEndian>()? | ((reader.read_u8()? as u32) << 24);
+
+        // The stream id according to the spec is ALWAYS 0. (likely not true)
+        let stream_id = reader.read_u24::<BigEndian>()?;
+
+        // We then extract the data from the reader. (advancing the cursor to the end of
+        // the tag)
+        let data = reader.extract_bytes(data_size as usize)?;
+
+        Ok(FlvTag {
+            timestamp_ms,
+            stream_id,
+            tag_type,
+            data,
+        })
+    }
+
+    pub fn size(&self) -> usize {
+        self.data.len() + 11
     }
 }
 
@@ -108,7 +348,7 @@ impl fmt::Display for FlvTag {
 /// - ScriptData(18)
 ///
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FlvTagType {
     Audio = 8,
     Video = 9,
@@ -123,6 +363,17 @@ impl From<u8> for FlvTagType {
             9 => FlvTagType::Video,
             18 => FlvTagType::ScriptData,
             _ => FlvTagType::Unknown(value),
+        }
+    }
+}
+
+impl Into<u8> for FlvTagType {
+    fn into(self) -> u8 {
+        match self {
+            FlvTagType::Audio => 8,
+            FlvTagType::Video => 9,
+            FlvTagType::ScriptData => 18,
+            FlvTagType::Unknown(value) => value,
         }
     }
 }
@@ -157,7 +408,7 @@ pub enum FlvTagData {
     /// Defined by:
     /// - video_file_format_spec_v10.pdf (Chapter 1 - The FLV File Format - Video tags)
     /// - video_file_format_spec_v10_1.pdf (Annex E.4.3.1 - VIDEODATA)
-    Video(VideoTagHeader),
+    Video(VideoData),
     /// ScriptData when the FlvTagType is ScriptData(18)
     /// Defined by:
     /// - video_file_format_spec_v10.pdf (Chapter 1 - The FLV File Format - Data tags)
@@ -181,7 +432,7 @@ impl FlvTagData {
     ) -> std::io::Result<Self> {
         match tag_type {
             FlvTagType::Audio => Ok(FlvTagData::Audio(AudioData::demux(reader, None)?)),
-            FlvTagType::Video => Ok(FlvTagData::Video(VideoTagHeader::demux(reader)?)),
+            FlvTagType::Video => Ok(FlvTagData::Video(VideoData::demux(reader)?)),
             FlvTagType::ScriptData => Ok(FlvTagData::ScriptData(ScriptData::demux(reader)?)),
             _ => Ok(FlvTagData::Unknown {
                 tag_type,

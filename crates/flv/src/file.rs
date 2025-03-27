@@ -1,8 +1,10 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, Bytes};
 
+use crate::tag::FlvUtil;
+
 use super::header::FlvHeader;
-use super::tag::FlvTag;
+use super::tag::FlvTagOwned;
 
 /// An FLV file is a combination of a [`FlvHeader`] followed by the
 /// `FLVFileBody` (which is just a series of [`FlvTag`]s)
@@ -13,7 +15,7 @@ use super::tag::FlvTag;
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlvFile {
     pub header: FlvHeader,
-    pub tags: Vec<FlvTag>,
+    pub tags: Vec<FlvTagOwned>,
 }
 
 impl FlvFile {
@@ -35,7 +37,7 @@ impl FlvFile {
             }
 
             // Demux the tag from the reader.
-            let tag = FlvTag::demux(reader)?;
+            let tag = FlvTagOwned::demux(reader)?;
             tags.push(tag);
         }
 

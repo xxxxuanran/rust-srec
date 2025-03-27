@@ -332,6 +332,28 @@ pub enum VideoTagBody {
     },
 }
 
+impl VideoTagBody {
+    pub fn is_sequence_header(&self) -> bool {
+        match self {
+            VideoTagBody::Avc(avc_data) => {
+                // Check if the data is a sequence header
+                match avc_data {
+                    AvcPacket::SequenceHeader(_) => true,
+                    _ => false,
+                }
+            }
+            VideoTagBody::Hevc(hevc_data) => {
+                // Check if the data is a sequence header
+                match hevc_data {
+                    HevcPacket::SequenceStart(_) => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
 /// A wrapper enum for the different types of video packets that can be used in
 /// a FLV file.
 ///
@@ -433,21 +455,21 @@ pub enum EnhancedPacket {
 /// - video_file_format_spec_v10.pdf (Chapter 1 - The FLV File Format - Video tags)
 /// - video_file_format_spec_v10_1.pdf (Annex E.4.3.1 - VIDEODATA)
 #[derive(Debug, Clone, PartialEq)]
-pub struct VideoTagHeader {
+pub struct VideoData {
     /// The frame type of the video data. (4 bits)
     pub frame_type: VideoFrameType,
     /// The body of the video data.
     pub body: VideoTagBody,
 }
 
-impl VideoTagHeader {
+impl VideoData {
     /// Demux a video data from the given reader
     pub fn demux(reader: &mut io::Cursor<Bytes>) -> io::Result<Self> {
         let byte = reader.read_u8()?;
         let enhanced = (byte & 0b1000_0000) != 0;
         let frame_type_byte = (byte >> 4) & 0b0111;
         let packet_type_byte = byte & 0b0000_1111;
-        let frame_type = VideoFrameType::try_from(frame_type_byte)?;
+        let frame_type: VideoFrameType = VideoFrameType::try_from(frame_type_byte)?;
         let body = if frame_type == VideoFrameType::VideoInfoFrame {
             let command_packet = VideoCommand::try_from(reader.read_u8()?)?;
             VideoTagBody::Command(command_packet)
@@ -455,7 +477,7 @@ impl VideoTagHeader {
             VideoTagBody::demux(VideoPacketType::new(packet_type_byte, enhanced), reader)?
         };
 
-        Ok(VideoTagHeader { frame_type, body })
+        Ok(VideoData { frame_type, body })
     }
 }
 
@@ -567,7 +589,7 @@ impl VideoTagBody {
     }
 }
 
-impl std::fmt::Display for VideoTagHeader {
+impl std::fmt::Display for VideoData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VideoTag [{}] {}", self.frame_type, self.body)
     }
@@ -838,10 +860,10 @@ mod tests {
             0b01010000, // frame type (5)
             0x01,       // command packet
         ]));
-        let body = VideoTagHeader::demux(&mut reader).unwrap();
+        let body = VideoData::demux(&mut reader).unwrap();
         assert_eq!(
             body,
-            VideoTagHeader {
+            VideoData {
                 frame_type: VideoFrameType::VideoInfoFrame,
                 body: VideoTagBody::Command(VideoCommand::StartSeek),
             }
@@ -854,10 +876,10 @@ mod tests {
             0b00010010, // enhanced + keyframe
             0, 1, 2, 3, // data
         ]));
-        let body = VideoTagHeader::demux(&mut reader).unwrap();
+        let body = VideoData::demux(&mut reader).unwrap();
         assert_eq!(
             body,
-            VideoTagHeader {
+            VideoData {
                 frame_type: VideoFrameType::KeyFrame,
                 body: VideoTagBody::Unknown {
                     codec_id: VideoCodecId::SorensonH263,
@@ -876,10 +898,10 @@ mod tests {
             16, 16, 64,
         ]));
 
-        let body = VideoTagHeader::demux(&mut reader).unwrap();
+        let body = VideoData::demux(&mut reader).unwrap();
         assert_eq!(
             body,
-            VideoTagHeader {
+            VideoData {
                 frame_type: VideoFrameType::KeyFrame,
                 body: VideoTagBody::Enhanced(EnhancedPacket::Av1(Av1Packet::SequenceStart(
                     AV1CodecConfigurationRecord {

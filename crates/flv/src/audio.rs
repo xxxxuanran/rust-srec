@@ -236,6 +236,14 @@ impl AudioDataBody {
             }),
         }
     }
+
+    /// Check if the audio data is a sequence header
+    pub fn is_sequence_header(&self) -> bool {
+        match self {
+            AudioDataBody::Aac(packet) => packet.is_sequence_header(),
+            AudioDataBody::Unknown { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,7 +256,7 @@ pub enum AudioPacket {
 
 // New in E-RTMP v2, Audio Packet Type
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub enum AudioPacketType {
     SequenceStart = 0,
     CodecFrames = 1,

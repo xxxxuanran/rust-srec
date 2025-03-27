@@ -65,6 +65,10 @@ impl AacPacket {
             // _ => AacPacket::Unknown { aac_packet_type, data },
         }
     }
+
+    pub fn is_sequence_header(&self) -> bool {
+        matches!(self, AacPacket::SequenceHeader(_))
+    }
 }
 
 impl fmt::Display for AacPacket {

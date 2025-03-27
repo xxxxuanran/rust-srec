@@ -2,6 +2,7 @@
 
 members = [
     "crates/flv",
+    "crates/flv-fix",
     "crates/aac",
     "crates/bytes-util",
     "crates/expgolomb",
@@ -17,3 +18,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.10.1"
+byteorder = "1.5.0"
+kanal = "0.1"
+criterion = "0.5"
+tokio = { version = "1.36", features = ["full"] }
+
+[[bench]]
+name = "test_channels"
+harness = false

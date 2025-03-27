@@ -1,5 +1,5 @@
 [package]
-name = "flv"
+name = "flv-fix"
 version = "0.1.0"
 edition = "2024"
 
@@ -12,11 +12,12 @@ tokio-util = { version = "0.7.14", features = ["io", "codec"] }
 tokio-stream = "0.1.17"
 futures = "0.3"
 bytes-util = { path = "../bytes-util" }
+flv = { path = "../flv" }
 amf0 = { path = "../amf0" }
-av1 = { path = "../av1" }
-h264 = { path = "../h264" }
-h265 = { path = "../h265" }
-
+log = "0.4"
+crc32fast = "1.4.2"
+async-stream = "0.3.0"
+chrono = "0.4"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
