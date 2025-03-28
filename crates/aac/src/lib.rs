@@ -13,9 +13,9 @@
 
 use std::io;
 
+use bytes_util::BitReader;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use bytes_util::BitReader;
 
 /// A Partial Audio Specific Config
 /// ISO/IEC 14496-3:2019(E) - 1.6
@@ -168,14 +168,22 @@ impl PartialAudioSpecificConfig {
         // The table calls for us to read a 4-bit value. If the value is type FreqEscape
         // (0xF), we need to read 24 bits to get the sampling frequency.
         let sampling_frequency_index = SampleFrequencyIndex::from_u8(bitreader.read_bits(4)? as u8)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid sampling frequency index"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid sampling frequency index",
+                )
+            })?;
 
         let sampling_frequency = match sampling_frequency_index {
             // Uses the extended sampling frequency to represent the freq as a non-common value
             SampleFrequencyIndex::FreqEscape => bitreader.read_bits(24)? as u32,
-            _ => sampling_frequency_index
-                .to_freq()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid sampling frequency index"))?,
+            _ => sampling_frequency_index.to_freq().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid sampling frequency index",
+                )
+            })?,
         };
 
         // 4 Bits to get the channel configuration
@@ -197,7 +205,8 @@ mod tests {
     #[test]
     fn test_aac_config_parse() {
         let data = [
-            0x12, 0x10, 0x56, 0xe5, 0x00, 0x2d, 0x96, 0x01, 0x80, 0x80, 0x05, 0x00, 0x00, 0x00, 0x00,
+            0x12, 0x10, 0x56, 0xe5, 0x00, 0x2d, 0x96, 0x01, 0x80, 0x80, 0x05, 0x00, 0x00, 0x00,
+            0x00,
         ];
 
         let config = PartialAudioSpecificConfig::parse(&data).unwrap();
