@@ -1,5 +1,5 @@
 use crate::context::StreamerContext;
-use crate::error::FlvError;
+use flv::error::FlvError;
 use flv::data::FlvData;
 use flv::header::FlvHeader;
 use log::warn;

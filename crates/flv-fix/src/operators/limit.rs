@@ -55,9 +55,9 @@
 //! ```
 
 use crate::context::StreamerContext;
-use crate::error::FlvError;
 use bytes::{Bytes, BytesMut};
 use flv::data::FlvData;
+use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use log::{debug, info, warn};

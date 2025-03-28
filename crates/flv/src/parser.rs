@@ -8,7 +8,7 @@ use crate::file::FlvFile;
 use crate::header::FlvHeader;
 use crate::tag::{self, FlvTagOwned, FlvUtil};
 
-const BUFFER_SIZE: usize = 4 * 1024; // 8 KB buffer size
+const BUFFER_SIZE: usize = 4 * 1024; // 4 KB buffer size
 
 pub struct FlvParser;
 
@@ -23,8 +23,12 @@ impl FlvParser {
         reader.read_exact(&mut buffer)?;
         let mut cursor = Cursor::new(buffer.freeze());
         let header = FlvHeader::parse(&mut cursor)?;
-        let mut tags: Vec<FlvTagOwned> = Vec::new();
         let mut tags_count = 0;
+
+        // Add these variables to track tag types
+        let mut video_tags = 0;
+        let mut audio_tags = 0;
+        let mut metadata_tags = 0;
 
         // Create a new buffer for reading tags
         let mut tag_buffer = BytesMut::with_capacity(BUFFER_SIZE);
@@ -77,11 +81,27 @@ impl FlvParser {
 
             // Use FlvTag::demux to parse the entire tag
             let tag = FlvTagOwned::demux(&mut Cursor::new(tag_buffer.freeze()))?;
-            // tags.push(tag);
             tags_count += 1;
+
+            // Check if the tag is a video tag
+            if tag.is_video_tag() {
+                video_tags += 1;
+            } else if tag.is_audio_tag() {
+                audio_tags += 1; // Audio tag
+            } else if tag.is_script_tag() {
+                metadata_tags += 1; // Script/metadata tag
+            } else {
+                // Unknown tag type, you can handle it as needed
+                println!("Unknown tag type: {:?}", tag);
+            }
             // Reset buffer for next tag
             tag_buffer = BytesMut::with_capacity(BUFFER_SIZE);
         }
+
+        println!(
+            "Audio tags: {}, Video tags: {}, Metadata tags: {}",
+            audio_tags, video_tags, metadata_tags
+        );
 
         Ok(tags_count)
     }
@@ -93,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file() -> Result<(), Box<dyn std::error::Error>> {
-        let path = Path::new("D:\\Downloads\\07_47_26-今天能超过10个人吗？.flv");
+        let path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
 
         // Skip the test if the file doesn't exist
         if !path.exists() {

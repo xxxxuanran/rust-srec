@@ -1,5 +1,4 @@
 use crate::context::StreamerContext;
-use crate::error::FlvError;
 use crate::operators::limit::{self, LimitConfig};
 use crate::operators::{
     ContinuityMode, DefragmentOperator, GopSortOperator, HeaderCheckOperator, LimitOperator,
@@ -8,6 +7,7 @@ use crate::operators::{
 };
 use bytes::buf::Limit;
 use flv::data::FlvData;
+use flv::error::FlvError;
 use futures::FutureExt;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
@@ -40,7 +40,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             duplicate_tag_filtering: true,
-            file_size_limit: 2 * 1024 * 1024 * 1024, // 2 GB
+            file_size_limit: 6 * 1024 * 1024 * 1024, // 2 GB
             duration_limit: 0.0,
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
@@ -179,26 +179,30 @@ impl FlvPipeline {
 
 mod test {
     use super::*;
+    use bytes::{Buf, Bytes, BytesMut};
     use chrono::Local;
     use flv::data::FlvData;
     use flv::header::FlvHeader;
+    use flv::parser_async::FlvParser;
     use flv::tag::{FlvTag, FlvTagType};
     use flv::writer::FlvWriter;
     use futures::StreamExt;
+    use std::io::Cursor;
     use std::path::Path;
     use tokio::fs::File;
-    use tokio::io::{AsyncReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
-    use bytes::{BytesMut, Bytes, Buf};
-    use std::io::Cursor;
 
     #[tokio::test]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
         // Source and destination paths
-        let input_path = Path::new("D:/Downloads/07_47_26-今天能超过10个人吗？.flv");
-        let output_dir = Path::new("D:/Downloads/");
-        let base_name = "processed_output";
+        let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
+        let output_dir = input_path.parent().unwrap().join("fix");
+        std::fs::create_dir_all(&output_dir).unwrap_or_else(|_| {
+            println!("Output directory already exists, using it.");
+        });
+        let base_name = input_path.file_name().unwrap().to_str().unwrap();
         let extension = "flv";
 
         // Skip if test file doesn't exist
@@ -207,10 +211,11 @@ mod test {
             return Ok(());
         }
 
+        let mut start_time = std::time::Instant::now(); // Start timer
         // Open the input file
         let file = File::open(input_path).await?;
         let mut reader = BufReader::new(file);
-        
+
         // Create the context
         let context = StreamerContext::default();
 
@@ -218,117 +223,27 @@ mod test {
         let pipeline = FlvPipeline::new(context);
 
         // Create channel for the FlvData stream
-        let (tx, rx) = mpsc::channel(32);
+        // let (tx, rx) = mpsc::channel(32);
 
         // Start a task to parse the input file
-        tokio::spawn(async move {
-            // Read the FLV header first (9 bytes)
-            let mut header_buf = BytesMut::with_capacity(9);
-            header_buf.resize(9, 0);
-            if let Err(e) = reader.read_exact(&mut header_buf).await {
-                eprintln!("Failed to read header: {}", e);
-                return;
-            }
-
-            // Parse the header using a cursor
-            let mut cursor = Cursor::new(header_buf.freeze());
-            let header = match FlvHeader::parse(&mut cursor) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("Failed to parse header: {}", e);
-                    return;
-                }
-            };
-
-            // Send the header to the pipeline
-            if let Err(e) = tx.send(Ok(FlvData::Header(header))).await {
-                eprintln!("Failed to send header: {}", e);
-                return;
-            }
-
-            // Skip first 4 bytes (first previous tag size)
-            let mut prev_tag_size_buf = [0u8; 4];
-            if let Err(e) = reader.read_exact(&mut prev_tag_size_buf).await {
-                eprintln!("Failed to read initial previous tag size: {}", e);
-                return;
-            }
-
-            let mut tag_count = 0;
-            
-            // Process tags
-            loop {
-                // We first need to determine how much data we need to read for the tag
-                // Read first byte to determine tag type and data size
-                let mut peek_buf = [0u8; 4];  // Enough to read tag type (1 byte) and data size (3 bytes)
-                
-                match reader.read_exact(&mut peek_buf).await {
-                    Ok(_) => {
-                        // Calculate data size from bytes 1-3
-                        let data_size = ((peek_buf[1] as u32) << 16) | 
-                                       ((peek_buf[2] as u32) << 8) | 
-                                       (peek_buf[3] as u32);
-                        
-                        // Allocate a buffer for the complete tag: 11 bytes header + data size
-                        let mut tag_buf = BytesMut::with_capacity(11 + data_size as usize);
-                        
-                        // Add the 4 bytes we've already read
-                        tag_buf.extend_from_slice(&peek_buf);
-                        
-                        // Resize to fit the whole tag and read the rest
-                        tag_buf.resize(11 + data_size as usize, 0);
-                        if let Err(e) = reader.read_exact(&mut tag_buf[4..]).await {
-                            eprintln!("Error reading rest of tag: {}", e);
-                            break;
-                        }
-                        
-                        // Parse the tag
-                        let mut tag_cursor = Cursor::new(tag_buf.freeze());
-                        match FlvTag::demux(&mut tag_cursor) {
-                            Ok(tag) => {
-                                tag_count += 1;
-                                if let Err(e) = tx.send(Ok(FlvData::Tag(tag))).await {
-                                    eprintln!("Error sending tag: {}", e);
-                                    break;
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("Error parsing tag: {}", e);
-                                break;
-                            }
-                        }
-                        
-                        // Skip previous tag size
-                        if let Err(e) = reader.read_exact(&mut prev_tag_size_buf).await {
-                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                                break;  // End of file
-                            }
-                            eprintln!("Error reading previous tag size: {}", e);
-                            break;
-                        }
-                    },
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                            // End of file reached
-                            break;
-                        }
-                        eprintln!("Error reading tag header: {}", e);
-                        break;
-                    }
-                }
-            }
-            
-            println!("Parsed {} tags from input file", tag_count);
-        });
+        let decoder_stream = FlvParser::create_decoder_stream(input_path)
+            .await
+            .map_err(|e| {
+                FlvError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to open file: {}", e),
+                ))
+            })?;
 
         // Create the input stream
-        let input_stream = ReceiverStream::new(rx).boxed();
+        let input_stream = decoder_stream.boxed();
 
         // Process the stream
         let processed_stream = pipeline.process(input_stream);
 
         // Process and write results
         futures::pin_mut!(processed_stream);
-        
+
         let mut current_writer: Option<FlvWriter<std::fs::File>> = None;
         let mut file_counter = 0;
         let mut total_count = 0;
@@ -351,12 +266,12 @@ mod test {
                         "{}_{}_part{}.{}",
                         base_name, timestamp, file_counter, extension
                     ));
-                    
+
                     println!("Creating new output file: {:?}", output_path);
-                    
+
                     let output_file = std::fs::File::create(&output_path)?;
                     current_writer = Some(FlvWriter::new(output_file, &header)?);
-                },
+                }
                 Ok(FlvData::Tag(tag)) => {
                     // If we don't have a writer, create one with a default header
                     if current_writer.is_none() {
@@ -366,9 +281,9 @@ mod test {
                             "{}_{}_part{}.{}",
                             base_name, timestamp, file_counter, extension
                         ));
-                        
+
                         println!("Creating initial output file: {:?}", output_path);
-                        
+
                         let default_header = FlvHeader::new(true, true);
                         let output_file = std::fs::File::create(&output_path)?;
                         current_writer = Some(FlvWriter::new(output_file, &default_header)?);
@@ -380,7 +295,7 @@ mod test {
                         total_count += 1;
                         current_file_count += 1;
                     }
-                },
+                }
                 Err(e) => eprintln!("Error: {}", e),
                 _ => {}
             }
@@ -392,7 +307,12 @@ mod test {
             println!("Wrote {} tags to file {}", current_file_count, file_counter);
         }
 
-        println!("Processed and wrote {} tags across {} files", total_count, file_counter);
+        println!("Processing completed in {:.2?}", start_time.elapsed());
+
+        println!(
+            "Processed and wrote {} tags across {} files",
+            total_count, file_counter
+        );
 
         Ok(())
     }
