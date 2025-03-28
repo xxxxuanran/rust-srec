@@ -77,16 +77,16 @@ impl FlvPipeline {
         let config = self.config.clone();
 
         // Create channels for all operators
-        let (defrag_tx, defrag_rx) = tokio::sync::mpsc::channel(16);
-        let (header_check_tx, header_check_rx) = tokio::sync::mpsc::channel(16);
-        let (limit_tx, limit_rx) = tokio::sync::mpsc::channel(16);
-        let (gop_sort_tx, gop_sort_rx) = tokio::sync::mpsc::channel(16);
-        let (script_filter_tx, script_filter_rx) = tokio::sync::mpsc::channel(16);
-        let (timing_repair_tx, timing_repair_rx) = tokio::sync::mpsc::channel(16);
-        let (split_tx, split_rx) = tokio::sync::mpsc::channel(16);
-        let (time_consistency_tx, time_consistency_rx) = tokio::sync::mpsc::channel(16);
-        let (time_consistency_2_tx, time_consistency_2_rx) = tokio::sync::mpsc::channel(16);
-        let (input_tx, input_rx) = tokio::sync::mpsc::channel(16);
+        let (defrag_tx, defrag_rx) = kanal::bounded_async(16);
+        let (header_check_tx, header_check_rx) = kanal::bounded_async(16);
+        let (limit_tx, limit_rx) = kanal::bounded_async(16);
+        let (gop_sort_tx, gop_sort_rx) = kanal::bounded_async(16);
+        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(16);
+        let (timing_repair_tx, timing_repair_rx) = kanal::bounded_async(16);
+        let (split_tx, split_rx) = kanal::bounded_async(16);
+        let (time_consistency_tx, time_consistency_rx) = kanal::bounded_async(16);
+        let (time_consistency_2_tx, time_consistency_2_rx) = kanal::bounded_async(16);
+        let (input_tx, input_rx) = kanal::bounded_async(16);
 
         // Create all operators
         let defrag_operator = DefragmentOperator::new(context.clone());
@@ -169,11 +169,19 @@ impl FlvPipeline {
                 .await;
         }));
 
-        let output_stream = tokio_stream::wrappers::ReceiverStream::new(script_filter_rx)
-            .map(move |item| item)
-            .boxed();
+        let output_stream = async_stream::stream! {
+            loop {
+                match script_filter_rx.recv().await {
+                    Ok(result) => match result {
+                        Ok(data) => yield Ok(data),
+                        Err(e) => yield Err(e),
+                    },
+                    Err(_) => break, // Channel closed
+                }
+            }
+        };
 
-        output_stream
+        Box::pin(output_stream)
     }
 }
 
@@ -221,9 +229,6 @@ mod test {
 
         // Create the pipeline with default configuration
         let pipeline = FlvPipeline::new(context);
-
-        // Create channel for the FlvData stream
-        // let (tx, rx) = mpsc::channel(32);
 
         // Start a task to parse the input file
         let decoder_stream = FlvParser::create_decoder_stream(input_path)

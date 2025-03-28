@@ -1,35 +1,89 @@
+//! # Header Check Operator
+//!
+//! The Header Check Operator ensures that FLV streams begin with a valid header.
+//!
+//! ## Purpose
+//!
+//! When processing FLV data, especially from unreliable sources or network
+//! streams, the initial header might be missing. This operator validates the
+//! stream structure and injects a header if needed.
+//!
+//! ## How it Works
+//!
+//! The operator:
+//!
+//! 1. Examines the first item in the stream
+//! 2. If it's already a valid FLV header, passes it through
+//! 3. If it's not a header (e.g., starts with a tag), inserts a default header
+//!    before passing along the original item
+//! 4. For errors, passes them through without inserting a header
+//!
+//! ## Use Cases
+//!
+//! This operator is particularly useful when:
+//! - Recording streams that might start mid-transmission
+//! - Processing incomplete FLV files
+//! - Ensuring downstream processors can assume proper FLV structure
+//!
+//! ## Configuration
+//!
+//! The operator creates a header with both audio and video flags set to true
+//! when insertion is needed.
+
 use crate::context::StreamerContext;
-use flv::error::FlvError;
 use flv::data::FlvData;
+use flv::error::FlvError;
 use flv::header::FlvHeader;
+use kanal;
 use log::warn;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 
+/// An operator that validates and ensures FLV streams have a proper header.
+///
+/// The HeaderCheckOperator inspects the beginning of a stream and inserts
+/// a standard FLV header if one is not present. This helps downstream
+/// processors by ensuring they always receive well-formed FLV data.
 pub struct HeaderCheckOperator {
     context: Arc<StreamerContext>,
 }
 
 impl HeaderCheckOperator {
+    /// Creates a new HeaderCheckOperator with the given context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The shared StreamerContext containing configuration and state
     pub fn new(context: Arc<StreamerContext>) -> Self {
         Self { context }
     }
 
     /// Process the input stream and ensure it starts with a valid FLV header.
     /// If no header is present at the beginning, a default one will be inserted.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The receiver channel for incoming FLV data
+    /// * `output` - The sender channel for validated output FLV data
+    ///
+    /// # Behavior
+    ///
+    /// - Monitors the first item in the stream
+    /// - If it's not a header, inserts a default one before forwarding the item
+    /// - Errors are passed through without header insertion
+    /// - All subsequent items are forwarded unchanged
     pub async fn process(
         &self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
+        input: kanal::AsyncReceiver<Result<FlvData, FlvError>>,
+        output: kanal::AsyncSender<Result<FlvData, FlvError>>,
     ) {
         let mut first_item = true;
 
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(data) => {
                     if first_item {
                         first_item = false;
-                        
+
                         // If the first item is not a header, insert a default one
                         if !matches!(data, FlvData::Header(_)) {
                             warn!(
@@ -38,12 +92,16 @@ impl HeaderCheckOperator {
                             );
                             // Send a default header
                             let default_header = FlvHeader::new(true, true);
-                            if output.send(Ok(FlvData::Header(default_header))).await.is_err() {
+                            if output
+                                .send(Ok(FlvData::Header(default_header)))
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
                     }
-                    
+
                     // Forward the data
                     if output.send(Ok(data)).await.is_err() {
                         return;
@@ -66,7 +124,6 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use flv::tag::{FlvTag, FlvTagType};
-    use tokio::sync::mpsc;
 
     // Helper function to create a test context
     fn create_test_context() -> Arc<StreamerContext> {
@@ -94,8 +151,8 @@ mod tests {
         let context = create_test_context();
         let operator = HeaderCheckOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::unbounded_async();
+        let (output_tx, output_rx) = kanal::unbounded_async();
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -116,12 +173,16 @@ mod tests {
 
         // Should receive all 6 items (header + 5 tags)
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
+            if received_items.len() == 6 {
+                // Got all expected items
+                break;
+            }
         }
 
         assert_eq!(received_items.len(), 6);
-        
+
         // First item should be a header
         assert!(matches!(received_items[0], FlvData::Header(_)));
     }
@@ -131,8 +192,8 @@ mod tests {
         let context = create_test_context();
         let operator = HeaderCheckOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::unbounded_async();
+        let (output_tx, output_rx) = kanal::unbounded_async();
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -152,12 +213,16 @@ mod tests {
 
         // Should receive 6 items (default header + 5 tags)
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
+            if received_items.len() == 6 {
+                // Got all expected items
+                break;
+            }
         }
 
         assert_eq!(received_items.len(), 6);
-        
+
         // First item should be a header
         assert!(matches!(received_items[0], FlvData::Header(_)));
     }
@@ -167,8 +232,8 @@ mod tests {
         let context = create_test_context();
         let operator = HeaderCheckOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::unbounded_async();
+        let (output_tx, output_rx) = kanal::unbounded_async();
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -197,15 +262,19 @@ mod tests {
 
         // Should receive 4 items (1 error + 3 tags)
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item);
+            if received_items.len() == 4 {
+                // Got all expected items
+                break;
+            }
         }
 
         assert_eq!(received_items.len(), 4);
-        
+
         // First item should be an error
         assert!(received_items[0].is_err());
-        
+
         // No header should be inserted after an error
         assert!(matches!(received_items[1], Ok(FlvData::Tag(_))));
     }

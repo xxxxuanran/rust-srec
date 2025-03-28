@@ -16,5 +16,5 @@ pub use header_check::HeaderCheckOperator;
 pub use limit::LimitOperator;
 pub use script_filter::ScriptFilterOperator;
 pub use split::SplitOperator;
-pub use time_consistency::{TimeConsistencyOperator, ContinuityMode};
-pub use timing_repair::{TimingRepairOperator, RepairStrategy, TimingRepairConfig};
+pub use time_consistency::{ContinuityMode, TimeConsistencyOperator};
+pub use timing_repair::{RepairStrategy, TimingRepairConfig, TimingRepairOperator};

@@ -1,29 +1,89 @@
+//! # Defragment Operator
+//!
+//! The Defragment Operator is responsible for detecting and handling fragmented FLV streams.
+//!
+//! ## Purpose
+//!
+//! When recording live streams, the connection may be interrupted or the stream might start
+//! mid-transmission. This can result in incomplete or fragmented FLV data that needs special
+//! handling to ensure the output file is valid and playable.
+//!
+//! ## How it Works
+//!
+//! The operator uses a buffering strategy:
+//!
+//! 1. When an FLV header is detected, it starts "gathering" mode
+//! 2. It buffers tags until a minimum threshold is reached
+//! 3. If enough tags are gathered, the stream is considered valid and all buffered tags are emitted
+//! 4. If another header is detected before gathering enough tags, the existing buffer is discarded
+//!    (considered a fragmented/invalid segment)
+//!
+//! This approach helps filter out small, broken segments while preserving complete, valid ones.
+//!
+//! ## Configuration
+//!
+//! The operator requires a minimum number of tags (`MIN_TAGS_NUM`) to consider a segment valid.
+//! This value can be adjusted based on stream characteristics.
+//!
+//! ## License
+//!
+//! MIT License
+//!
+//! ## Authors
+//!
+//! - hua0512
+//!
 use crate::context::StreamerContext;
-use flv::error::FlvError;
 use flv::data::FlvData;
+use flv::error::FlvError;
+use kanal::{AsyncReceiver, AsyncSender};
 use log::{debug, warn};
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 
+/// An operator that buffers and validates FLV stream fragments to ensure continuity and validity.
+///
+/// The DefragmentOperator helps manage fragmented streams by:
+/// - Buffering a minimum number of tags after each header
+/// - Only emitting complete segments with enough tags
+/// - Discarding small fragments that might be incomplete
+/// - Handling errors appropriately throughout the process
 pub struct DefragmentOperator {
     context: Arc<StreamerContext>,
 }
 
 impl DefragmentOperator {
+    /// Creates a new DefragmentOperator with the given context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The shared StreamerContext containing configuration and state
     pub fn new(context: Arc<StreamerContext>) -> Self {
         Self { context }
     }
 
+    /// Processes the input stream, buffering and validating fragments before passing them to output.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The receiver channel for incoming FLV data
+    /// * `output` - The sender channel for validated output FLV data
+    ///
+    /// # Behavior
+    ///
+    /// - When a header is received, starts buffering tags
+    /// - If enough tags are received (`MIN_TAGS_NUM`), emits the entire buffer
+    /// - If another header arrives before gathering enough tags, discards the buffer
+    /// - Propagates errors while clearing any in-progress buffering
     pub async fn process(
         &self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
+        mut input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
         const MIN_TAGS_NUM: usize = 10;
         let mut is_gathering = false;
         let mut buffer = Vec::with_capacity(MIN_TAGS_NUM);
 
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(data) => {
                     if matches!(data, FlvData::Header(_)) {
@@ -115,8 +175,8 @@ mod tests {
         header::FlvHeader,
         tag::{FlvTag, FlvTagType},
     };
+    use kanal;
     use std::time::Duration;
-    use tokio::sync::mpsc;
 
     // Helper function to create a test context
     fn create_test_context() -> Arc<StreamerContext> {
@@ -144,8 +204,8 @@ mod tests {
         let context = create_test_context();
         let operator = DefragmentOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -166,7 +226,7 @@ mod tests {
 
         // Should receive all 12 items (header + 11 tags)
         let mut count = 0;
-        while let Some(data) = output_rx.recv().await {
+        while let Ok(data) = output_rx.recv().await {
             count += 1;
         }
 
@@ -178,8 +238,8 @@ mod tests {
         let context = create_test_context();
         let operator = DefragmentOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -215,7 +275,7 @@ mod tests {
 
         // Should receive 13 items (header + 11 tags from second batch + 1 regular tag)
         let mut count = 0;
-        while let Some(_) = output_rx.recv().await {
+        while let Ok(_) = output_rx.recv().await {
             count += 1;
         }
 
@@ -227,8 +287,8 @@ mod tests {
         let context = create_test_context();
         let operator = DefragmentOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -266,7 +326,7 @@ mod tests {
 
         // Collect the results
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result);
         }
 
@@ -280,8 +340,8 @@ mod tests {
         let context = create_test_context();
         let operator = DefragmentOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -302,7 +362,7 @@ mod tests {
 
         // Should receive all 11 items (header + 10 tags)
         let mut count = 0;
-        while let Some(_) = output_rx.recv().await {
+        while let Ok(_) = output_rx.recv().await {
             count += 1;
         }
 
@@ -314,8 +374,8 @@ mod tests {
         let context = create_test_context();
         let operator = DefragmentOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -337,7 +397,7 @@ mod tests {
         // All items should be discarded
         let mut count = 0;
         let timeout = tokio::time::timeout(Duration::from_millis(100), async {
-            while let Some(_) = output_rx.recv().await {
+            while let Ok(_) = output_rx.recv().await {
                 count += 1;
             }
         })

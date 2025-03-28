@@ -27,7 +27,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use tokio::sync::mpsc;
+//! use kanal;
 //! use crate::context::StreamerContext;
 //! use crate::operators::limit::{LimitOperator, LimitConfig};
 //!
@@ -41,8 +41,8 @@
 //!     let operator = LimitOperator::with_config(context, config);
 //!
 //!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = mpsc::channel(32);
-//!     let (output_tx, output_rx) = mpsc::channel(32);
+//!     let (input_tx, input_rx) = kanal::bounded_async(32);
+//!     let (output_tx, output_rx) = kanal::bounded_async(32);
 //!
 //!     // Process stream in background task
 //!     tokio::spawn(async move {
@@ -53,6 +53,15 @@
 //!     // Process output from output_rx
 //! }
 //! ```
+//!
+//! ## License
+//!
+//! MIT License
+//!
+//! ## Authors
+//!
+//! - hua0512
+//!
 
 use crate::context::StreamerContext;
 use bytes::{Bytes, BytesMut};
@@ -60,10 +69,10 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use kanal::{AsyncReceiver, AsyncSender};
 use log::{debug, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, Sender};
 
 /// Reason for a stream split
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,10 +185,10 @@ impl LimitOperator {
 
     pub async fn process(
         &mut self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(data) => {
                     match &data {
@@ -355,7 +364,7 @@ impl LimitOperator {
     }
 
     /// Split the stream and re-emit headers
-    async fn split_stream(&mut self, output: &Sender<Result<FlvData, FlvError>>) -> bool {
+    async fn split_stream(&mut self, output: &AsyncSender<Result<FlvData, FlvError>>) -> bool {
         info!(
             "{} Splitting stream at size={} bytes, duration={}ms (segment #{})",
             self.context.name,
@@ -412,8 +421,8 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use flv::tag::{FlvTag, FlvTagType};
+    use kanal;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::mpsc;
 
     // Helper function to create a test context
     fn create_test_context() -> Arc<StreamerContext> {
@@ -524,8 +533,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -556,7 +565,7 @@ mod tests {
 
         // Collect the output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -607,8 +616,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -640,7 +649,7 @@ mod tests {
 
         // Collect the output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -675,8 +684,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -684,19 +693,6 @@ mod tests {
         });
 
         // Send a stream with sequence headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
-            .unwrap();
-
-        // Send a series of tags where keyframes are at timestamps 0, 400, 800
-        // With a 300ms limit, we should split at keyframes 400 and 800
         input_tx
             .send(Ok(create_video_tag(0, true, 100)))
             .await
@@ -743,7 +739,7 @@ mod tests {
 
         // Collect the output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -779,8 +775,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -830,7 +826,7 @@ mod tests {
 
         // Collect the output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -869,8 +865,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -909,7 +905,7 @@ mod tests {
         drop(input_tx);
 
         // Collect output
-        while let Some(_) = output_rx.recv().await {}
+        while let Ok(_) = output_rx.recv().await {}
 
         // Check split count
         let final_split_count = *split_count.lock().unwrap();
@@ -941,8 +937,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -974,7 +970,6 @@ mod tests {
             .unwrap();
 
         // Interleaved audio and video with keyframes at 0ms and 500ms
-        // Timeline: V(K,0) - A(50) - A(100) - V(150,I) - A(200) - A(250) - V(300,I) - A(350) - A(400) - V(450,I) - V(500,K)
         input_tx
             .send(Ok(create_video_tag(0, true, 100)))
             .await
@@ -1007,7 +1002,7 @@ mod tests {
 
         // Collect output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -1051,8 +1046,8 @@ mod tests {
 
         let mut operator = LimitOperator::with_config(context, config);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Process in background
         tokio::spawn(async move {
@@ -1067,7 +1062,7 @@ mod tests {
 
         // Collect output
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 

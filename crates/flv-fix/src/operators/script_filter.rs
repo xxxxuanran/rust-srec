@@ -22,7 +22,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use tokio::sync::mpsc;
+//! use kanal::{bounded_async};
 //! use crate::context::StreamerContext;
 //! use crate::operators::script_filter::ScriptFilterOperator;
 //!
@@ -31,8 +31,8 @@
 //!     let operator = ScriptFilterOperator::new(context);
 //!     
 //!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = mpsc::channel(32);
-//!     let (output_tx, output_rx) = mpsc::channel(32);
+//!     let (input_tx, input_rx) = bounded_async(32);
+//!     let (output_tx, output_rx) = bounded_async(32);
 //!     
 //!     // Process stream in background task
 //!     tokio::spawn(async move {
@@ -51,12 +51,12 @@
 //!
 
 use crate::context::StreamerContext;
-use flv::error::FlvError;
 use flv::data::FlvData;
+use flv::error::FlvError;
 use flv::tag::FlvTagType;
+use kanal::{AsyncReceiver, AsyncSender};
 use log::{debug, info};
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 /// Operator that filters out script data tags except for the first one
 pub struct ScriptFilterOperator {
@@ -72,13 +72,13 @@ impl ScriptFilterOperator {
     /// Process method that filters FLV data, removing duplicate script tags
     pub async fn process(
         &self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
         let mut seen_script_tag = false;
         let mut script_tag_count = 0;
 
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(data) => {
                     match &data {
@@ -154,7 +154,6 @@ mod tests {
     use bytes::Bytes;
     use flv::header::FlvHeader;
     use flv::tag::FlvTag;
-    use tokio::sync::mpsc;
 
     // Helper functions for testing
     fn create_test_context() -> Arc<StreamerContext> {
@@ -189,8 +188,8 @@ mod tests {
         let context = create_test_context();
         let operator = ScriptFilterOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, output_rx) = kanal::bounded_async(32);
 
         tokio::spawn(async move {
             operator.process(input_rx, output_tx).await;
@@ -229,7 +228,7 @@ mod tests {
 
         // Collect results
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result.unwrap());
         }
 
@@ -263,8 +262,8 @@ mod tests {
         let context: Arc<StreamerContext> = create_test_context();
         let operator = ScriptFilterOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, output_rx) = kanal::bounded_async(32);
 
         tokio::spawn(async move {
             operator.process(input_rx, output_tx).await;
@@ -299,9 +298,8 @@ mod tests {
 
         // Collect results
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result.unwrap());
-            println!("Result: {:?}", results.last().unwrap());
         }
 
         // Check we have the correct number of items (2 headers + 2 script tags + 2 video tags = 6)

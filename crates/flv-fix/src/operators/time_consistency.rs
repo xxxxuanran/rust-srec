@@ -31,7 +31,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use tokio::sync::mpsc;
+//! use kanal;
 //! use crate::context::StreamerContext;
 //! use crate::operators::time_consistency::{TimeConsistencyOperator, ContinuityMode};
 //!
@@ -41,8 +41,8 @@
 //!     let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 //!     
 //!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = mpsc::channel(32);
-//!     let (output_tx, output_rx) = mpsc::channel(32);
+//!     let (input_tx, input_rx) = kanal::bounded_async(32);
+//!     let (output_tx, output_rx) = kanal::bounded_async(32);
 //!     
 //!     // Process stream in background task
 //!     tokio::spawn(async move {
@@ -60,17 +60,18 @@
 //!
 //! ## Authors
 //!
-//! - GitHub Copilot
+//! - hua0512
 //!
 
 use crate::context::StreamerContext;
-use flv::error::FlvError;
 use flv::data::FlvData;
+use flv::error::FlvError;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use kanal::AsyncReceiver as Receiver;
+use kanal::AsyncSender as Sender;
 use log::{debug, info, warn};
 use std::cmp::min;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 /// Defines how timestamps should be handled across stream splits
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,12 +148,12 @@ impl TimeConsistencyOperator {
     /// Process method that receives FLV data, corrects timestamps, and forwards the data
     pub async fn process(
         &self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
+        input: Receiver<Result<FlvData, FlvError>>,
         output: Sender<Result<FlvData, FlvError>>,
     ) {
         let mut state = TimelineState::new();
 
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(mut data) => {
                     match &mut data {
@@ -174,12 +175,12 @@ impl TimeConsistencyOperator {
                         FlvData::Tag(tag) => {
                             let original_timestamp = tag.timestamp_ms;
 
-                            
                             if tag.is_script_tag() {
                                 // apply delta to script data tags
                                 if state.timestamp_offset != 0 {
                                     // Calculate the corrected timestamp, ensure it doesn't go negative
-                                    let corrected = (tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
+                                    let corrected =
+                                        (tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
                                     tag.timestamp_ms = min(0, corrected);
 
                                     debug!(
@@ -303,7 +304,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use flv::header::FlvHeader;
-    use tokio::sync::mpsc;
+    use kanal;
 
     // Helper functions (similar to those in SplitOperator for consistency)
     fn create_test_context() -> Arc<StreamerContext> {
@@ -339,8 +340,8 @@ mod tests {
         let context = create_test_context();
         let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, output_rx) = kanal::bounded_async(32);
 
         tokio::spawn(async move {
             operator.process(input_rx, output_tx).await;
@@ -369,7 +370,7 @@ mod tests {
 
         // Collect results and verify timestamps
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result.unwrap());
         }
 
@@ -401,8 +402,8 @@ mod tests {
         let context = create_test_context();
         let operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, output_rx) = kanal::bounded_async(32);
 
         tokio::spawn(async move {
             operator.process(input_rx, output_tx).await;
@@ -435,7 +436,7 @@ mod tests {
 
         // Collect results and verify timestamps
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result.unwrap());
         }
 
@@ -463,8 +464,8 @@ mod tests {
         let context = create_test_context();
         let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, output_rx) = kanal::bounded_async(32);
 
         tokio::spawn(async move {
             operator.process(input_rx, output_tx).await;
@@ -493,7 +494,7 @@ mod tests {
 
         // Collect results
         let mut results = Vec::new();
-        while let Some(result) = output_rx.recv().await {
+        while let Ok(result) = output_rx.recv().await {
             results.push(result.unwrap());
         }
 

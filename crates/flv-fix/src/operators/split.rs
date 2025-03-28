@@ -26,7 +26,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use tokio::sync::mpsc;
+//! use kanal;
 //! use crate::context::StreamerContext;
 //! use crate::operators::split::SplitOperator;
 //!
@@ -35,8 +35,8 @@
 //!     let operator = SplitOperator::new(context);
 //!     
 //!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = mpsc::channel(32);
-//!     let (output_tx, output_rx) = mpsc::channel(32);
+//!     let (input_tx, input_rx) = kanal::bounded_async(32);
+//!     let (output_tx, output_rx) = kanal::bounded_async(32);
 //!     
 //!     // Process stream in background task
 //!     tokio::spawn(async move {
@@ -62,9 +62,9 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use kanal;
 use log::{debug, info, warn};
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 // Store data wrapped in Arc for efficient cloning
 struct StreamState {
@@ -117,15 +117,15 @@ impl SplitOperator {
 
     pub async fn process(
         &self,
-        mut input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
+        mut input: kanal::AsyncReceiver<Result<FlvData, FlvError>>,
+        output: kanal::AsyncSender<Result<FlvData, FlvError>>,
     ) {
         let mut state = StreamState::new();
 
         // Send header and cached tags to rebuild stream after split
         async fn insert_header_and_tags(
             context: &StreamerContext,
-            output: &Sender<Result<FlvData, FlvError>>,
+            output: &kanal::AsyncSender<Result<FlvData, FlvError>>,
             state: &StreamState,
         ) -> bool {
             // Helper macro to reduce repetition when sending tags with Arc
@@ -169,7 +169,7 @@ impl SplitOperator {
         // Split stream and reinject header+sequence data
         async fn split_stream(
             context: &StreamerContext,
-            output: &Sender<Result<FlvData, FlvError>>,
+            output: &kanal::AsyncSender<Result<FlvData, FlvError>>,
             state: &mut StreamState,
         ) -> bool {
             info!("{} Splitting stream...", context.name);
@@ -191,7 +191,7 @@ impl SplitOperator {
         }
 
         // Main processing loop
-        while let Some(item) = input.recv().await {
+        while let Ok(item) = input.recv().await {
             match item {
                 Ok(data) => {
                     match &data {
@@ -290,7 +290,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use flv::tag::{FlvTag, FlvTagType};
-    use tokio::sync::mpsc;
+    use kanal;
 
     // Helper function to create a test context
     fn create_test_context() -> Arc<StreamerContext> {
@@ -393,8 +393,8 @@ mod tests {
         let context = create_test_context();
         let operator = SplitOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -432,7 +432,7 @@ mod tests {
 
         // Should receive all 8 items without any extra insertions
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -444,8 +444,8 @@ mod tests {
         let context = create_test_context();
         let operator = SplitOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -499,7 +499,7 @@ mod tests {
 
         // Collect all received items
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -537,8 +537,8 @@ mod tests {
         let context = create_test_context();
         let operator = SplitOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the process in a separate task
         tokio::spawn(async move {
@@ -591,7 +591,7 @@ mod tests {
 
         // Collect all received items
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
@@ -618,8 +618,8 @@ mod tests {
         let context = create_test_context();
         let operator = SplitOperator::new(context);
 
-        let (input_tx, input_rx) = mpsc::channel(32);
-        let (output_tx, mut output_rx) = mpsc::channel(32);
+        let (input_tx, input_rx) = kanal::bounded_async(32);
+        let (output_tx, mut output_rx) = kanal::bounded_async(32);
 
         // Start the operator in a separate task
         tokio::spawn(async move {
@@ -688,7 +688,7 @@ mod tests {
 
         // Collect all received items
         let mut received_items = Vec::new();
-        while let Some(item) = output_rx.recv().await {
+        while let Ok(item) = output_rx.recv().await {
             received_items.push(item.unwrap());
         }
 
