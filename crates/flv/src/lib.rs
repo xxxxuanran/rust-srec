@@ -2,7 +2,6 @@ mod aac;
 pub mod audio;
 mod av1;
 pub mod avc;
-mod buffer;
 pub mod data;
 pub mod error;
 mod file;
