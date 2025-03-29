@@ -340,10 +340,10 @@ mod test {
         }
 
         // Flush and close the final writer
-        // if let Some(mut writer) = current_writer {
-        //     writer.flush()?;
-        //     println!("Wrote {} tags to file {}", current_file_count, file_counter);
-        // }
+        if let Some(mut writer) = current_writer {
+            writer.flush()?;
+            println!("Wrote {} tags to file {}", current_file_count, file_counter);
+        }
 
         println!("Processing completed in {:.2?}", start_time.elapsed());
 
