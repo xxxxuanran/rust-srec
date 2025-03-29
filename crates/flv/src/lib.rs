@@ -13,3 +13,4 @@ pub mod script;
 pub mod tag;
 pub mod video;
 pub mod writer;
+pub mod writer_async;
