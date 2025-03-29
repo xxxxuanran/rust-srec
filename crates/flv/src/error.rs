@@ -1,42 +1,19 @@
-use std::error::Error;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum FlvError {
-    IoError(std::io::Error),
-    MalformedData(String),
-    FragmentedStream,
+    #[error("Invalid FLV header")]
     InvalidHeader,
-    IncompleteData,
-    TimestampError(String),
-    // Other error variants as needed
-}
-
-impl fmt::Display for FlvError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FlvError::IoError(err) => write!(f, "I/O error: {}", err),
-            FlvError::MalformedData(msg) => write!(f, "Malformed FLV data: {}", msg),
-            FlvError::FragmentedStream => write!(f, "Fragmented FLV stream detected"),
-            FlvError::InvalidHeader => write!(f, "Invalid FLV header"),
-            FlvError::IncompleteData => write!(f, "Incomplete FLV data"),
-            FlvError::TimestampError(msg) => write!(f, "Timestamp error: {}", msg),
-            // Handle other variants
-        }
-    }
-}
-
-impl Error for FlvError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            FlvError::IoError(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for FlvError {
-    fn from(err: std::io::Error) -> Self {
-        FlvError::IoError(err)
-    }
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Incomplete data provided to decoder")]
+    IncompleteData, // Keep this if FramedRead needs it, but decoder uses it less now
+    #[error("Error parsing tag data: {0}")]
+    TagParseError(String), // More specific error for demux failures
+    #[error("Resynchronization failed to find valid tag")]
+    ResyncFailed, // Optional: if resync gives up entirely
+    #[error("Invalid tag type encountered: {0}")]
+    InvalidTagType(u8),
+    #[error("Tag data size too large: {0}")]
+    TagTooLarge(u32),
 }
