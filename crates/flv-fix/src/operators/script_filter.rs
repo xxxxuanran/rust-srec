@@ -28,7 +28,7 @@
 //!
 //! async fn example() {
 //!     let context = Arc::new(StreamerContext::default());
-//!     let operator = ScriptFilterOperator::new(context);
+//!     let mut operator = ScriptFilterOperator::new(context);
 //!     
 //!     // Create channels for the pipeline
 //!     let (input_tx, input_rx) = bounded_async(32);
@@ -51,11 +51,12 @@
 //!
 
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::FlvTagType;
 use kanal::{AsyncReceiver, AsyncSender};
-use log::{debug, info};
+use tracing::{debug, info};
 use std::sync::Arc;
 
 /// Operator that filters out script data tags except for the first one
@@ -68,10 +69,15 @@ impl ScriptFilterOperator {
     pub fn new(context: Arc<StreamerContext>) -> Self {
         Self { context }
     }
+}
 
-    /// Process method that filters FLV data, removing duplicate script tags
-    pub async fn process(
-        &self,
+impl FlvOperator for ScriptFilterOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
         input: AsyncReceiver<Result<FlvData, FlvError>>,
         output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
@@ -146,6 +152,10 @@ impl ScriptFilterOperator {
         }
         debug!("{} Script filter operator completed", self.context.name);
     }
+
+    fn name(&self) -> &'static str {
+        "ScriptFilterOperator"
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn test_filter_script_tags() {
         let context = create_test_context();
-        let operator = ScriptFilterOperator::new(context);
+        let mut operator = ScriptFilterOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, output_rx) = kanal::bounded_async(32);
@@ -260,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_headers_reset_filtering() {
         let context: Arc<StreamerContext> = create_test_context();
-        let operator = ScriptFilterOperator::new(context);
+        let mut operator = ScriptFilterOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, output_rx) = kanal::bounded_async(32);

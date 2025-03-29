@@ -32,7 +32,7 @@
 //!
 //! async fn example() {
 //!     let context = Arc::new(StreamerContext::default());
-//!     let operator = SplitOperator::new(context);
+//!     let mut operator = SplitOperator::new(context);
 //!     
 //!     // Create channels for the pipeline
 //!     let (input_tx, input_rx) = kanal::bounded_async(32);
@@ -57,13 +57,15 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use bytes::Bytes;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal;
-use log::{debug, info, warn};
+use kanal::{AsyncReceiver, AsyncSender};
+use tracing::{debug, info, warn};
 use std::sync::Arc;
 
 // Store data wrapped in Arc for efficient cloning
@@ -114,11 +116,17 @@ impl SplitOperator {
     fn calculate_crc32(data: &[u8]) -> u32 {
         crc32fast::hash(data)
     }
+}
 
-    pub async fn process(
-        &self,
-        mut input: kanal::AsyncReceiver<Result<FlvData, FlvError>>,
-        output: kanal::AsyncSender<Result<FlvData, FlvError>>,
+impl FlvOperator for SplitOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
         let mut state = StreamState::new();
 
@@ -283,6 +291,10 @@ impl SplitOperator {
 
         debug!("{} completed.", self.context.name);
     }
+
+    fn name(&self) -> &'static str {
+        "SplitOperator"
+    }
 }
 
 #[cfg(test)]
@@ -391,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn test_normal_flow_no_changes() {
         let context = create_test_context();
-        let operator = SplitOperator::new(context);
+        let mut operator = SplitOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -442,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn test_video_parameter_change() {
         let context = create_test_context();
-        let operator = SplitOperator::new(context);
+        let mut operator = SplitOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -535,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn test_audio_parameter_change() {
         let context = create_test_context();
-        let operator = SplitOperator::new(context);
+        let mut operator = SplitOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -616,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn test_interleaved_parameter_changes() {
         let context = create_test_context();
-        let operator = SplitOperator::new(context);
+        let mut operator = SplitOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);

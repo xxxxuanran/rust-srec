@@ -9,6 +9,34 @@ pub mod split;
 pub mod time_consistency;
 pub mod timing_repair;
 
+use crate::context::StreamerContext;
+use flv::data::FlvData;
+use flv::error::FlvError;
+use kanal::{AsyncReceiver, AsyncSender};
+use std::sync::Arc;
+
+/// Common trait for all FLV stream operators
+pub trait FlvOperator {
+    /// Get the operator's context
+    fn context(&self) -> &Arc<StreamerContext>;
+
+    /// Process the FLV stream asynchronously
+    async fn process(
+        &mut self,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
+    );
+
+    /// Get the name of this operator for logging and debugging
+    fn name(&self) -> &'static str;
+
+    /// Process a single FLV data item (optional implementation for stateless operators)
+    fn process_item(&mut self, item: Result<FlvData, FlvError>) -> Result<FlvData, FlvError> {
+        // Default implementation just returns the item unchanged
+        item
+    }
+}
+
 // Re-export common operators
 pub use defragment::DefragmentOperator;
 pub use gop_sort::GopSortOperator;

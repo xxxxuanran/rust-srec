@@ -45,7 +45,7 @@
 //!
 //! async fn example() {
 //!     let context = Arc::new(StreamerContext::default());
-//!     let operator = TimingRepairOperator::new(
+//!     let mut operator = TimingRepairOperator::new(
 //!         context,
 //!         RepairStrategy::default(),
 //!     );
@@ -77,7 +77,8 @@ use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
-use log::{debug, info, warn};
+use tracing::{debug, info, warn};
+use tracing_subscriber::field::debug;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::f64;
@@ -337,6 +338,10 @@ impl TimingState {
     /// Check if a timestamp has rebounded (gone backward in time)
     fn is_timestamp_rebounded(&self, tag: &FlvTag) -> bool {
         let current = tag.timestamp_ms;
+        // warn!("Current timestamp: {}", current);
+        // warn!("Delta: {}", self.delta);
+        // warn!("Last tag timestamp: {:?}", self.last_tag.as_ref().map(|t| t.timestamp_ms));
+        // warn!("this tag is : {:?}", tag.tag_type);
         let expected = current + self.delta as u32;
 
         if tag.is_audio_tag() {
@@ -911,7 +916,7 @@ mod tests {
             ..Default::default()
         };
 
-        let operator = TimingRepairOperator::new(context, config);
+        let mut operator = TimingRepairOperator::new(context, config);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -1003,7 +1008,7 @@ mod tests {
             ..Default::default()
         };
 
-        let operator = TimingRepairOperator::new(context, config);
+        let mut operator = TimingRepairOperator::new(context, config);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -1070,7 +1075,7 @@ mod tests {
             ..Default::default()
         };
 
-        let operator = TimingRepairOperator::new(context, config);
+        let mut operator = TimingRepairOperator::new(context, config);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);

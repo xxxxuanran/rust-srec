@@ -34,10 +34,11 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use kanal::{AsyncReceiver, AsyncSender};
-use log::{debug, warn};
+use tracing::{debug, warn};
 use std::sync::Arc;
 
 /// An operator that buffers and validates FLV stream fragments to ensure continuity and validity.
@@ -60,23 +61,16 @@ impl DefragmentOperator {
     pub fn new(context: Arc<StreamerContext>) -> Self {
         Self { context }
     }
+}
 
-    /// Processes the input stream, buffering and validating fragments before passing them to output.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - The receiver channel for incoming FLV data
-    /// * `output` - The sender channel for validated output FLV data
-    ///
-    /// # Behavior
-    ///
-    /// - When a header is received, starts buffering tags
-    /// - If enough tags are received (`MIN_TAGS_NUM`), emits the entire buffer
-    /// - If another header arrives before gathering enough tags, discards the buffer
-    /// - Propagates errors while clearing any in-progress buffering
-    pub async fn process(
-        &self,
-        mut input: AsyncReceiver<Result<FlvData, FlvError>>,
+impl FlvOperator for DefragmentOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
         output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
         const MIN_TAGS_NUM: usize = 10;
@@ -164,6 +158,10 @@ impl DefragmentOperator {
             }
         }
     }
+
+    fn name(&self) -> &'static str {
+        "DefragmentOperator"
+    }
 }
 
 #[cfg(test)]
@@ -202,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn test_normal_flow_with_enough_tags() {
         let context = create_test_context();
-        let operator = DefragmentOperator::new(context);
+        let mut operator = DefragmentOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -236,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn test_header_reset() {
         let context = create_test_context();
-        let operator = DefragmentOperator::new(context);
+        let mut operator = DefragmentOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -285,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_propagation() {
         let context = create_test_context();
-        let operator = DefragmentOperator::new(context);
+        let mut operator = DefragmentOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -306,7 +304,7 @@ mod tests {
 
         // Send an error
         input_tx
-            .send(Err(FlvError::IoError(std::io::Error::new(
+            .send(Err(FlvError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Test error",
             ))))
@@ -338,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_of_stream_with_enough_tags() {
         let context = create_test_context();
-        let operator = DefragmentOperator::new(context);
+        let mut operator = DefragmentOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);
@@ -372,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_of_stream_with_insufficient_tags() {
         let context = create_test_context();
-        let operator = DefragmentOperator::new(context);
+        let mut operator = DefragmentOperator::new(context);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, mut output_rx) = kanal::bounded_async(32);

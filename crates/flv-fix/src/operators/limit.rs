@@ -38,7 +38,7 @@
 //!         max_duration_ms: Some(300_000),   // 5 minutes per segment
 //!         ..Default::default()
 //!     };
-//!     let operator = LimitOperator::with_config(context, config);
+//!     let mut operator = LimitOperator::with_config(context, config);
 //!
 //!     // Create channels for the pipeline
 //!     let (input_tx, input_rx) = kanal::bounded_async(32);
@@ -64,13 +64,14 @@
 //!
 
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use bytes::{Bytes, BytesMut};
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
-use log::{debug, info, warn};
+use tracing::{debug, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -183,7 +184,112 @@ impl LimitOperator {
         }
     }
 
-    pub async fn process(
+    fn determine_split_reason(&self) -> SplitReason {
+        let size_exceeded = self
+            .config
+            .max_size_bytes
+            .map(|max| self.state.accumulated_size >= max)
+            .unwrap_or(false);
+
+        let duration_exceeded = self
+            .config
+            .max_duration_ms
+            .map(|max| self.state.current_duration() >= max)
+            .unwrap_or(false);
+
+        match (size_exceeded, duration_exceeded) {
+            (true, true) => SplitReason::BothLimits,
+            (true, false) => SplitReason::SizeLimit,
+            (false, true) => SplitReason::DurationLimit,
+            _ => SplitReason::SizeLimit, // Default to size limit if somehow we get here
+        }
+    }
+
+    fn check_limits(&self) -> bool {
+        // Check size limit if configured
+        if let Some(max_size) = self.config.max_size_bytes {
+            if self.state.accumulated_size >= max_size {
+                println!(
+                    "{} Size limit exceeded: {} bytes (max: {} bytes)",
+                    self.context.name, self.state.accumulated_size, max_size
+                );
+                return true;
+            }
+        }
+
+        // Check duration limit if configured
+        if let Some(max_duration) = self.config.max_duration_ms {
+            let current_duration = self.state.current_duration();
+            if current_duration >= max_duration {
+                println!(
+                    "{} Duration limit exceeded: {} ms (max: {} ms)",
+                    self.context.name, current_duration, max_duration
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    async fn split_stream(&mut self, output: &AsyncSender<Result<FlvData, FlvError>>) -> bool {
+        info!(
+            "{} Splitting stream at size={} bytes, duration={}ms (segment #{})",
+            self.context.name,
+            self.state.accumulated_size,
+            self.state.current_duration(),
+            self.state.split_count + 1
+        );
+
+        // Helper macro to reduce repetition when sending tags with Arc
+        macro_rules! send_arc_item {
+            ($item:expr, $transform:expr, $msg:expr) => {
+                if let Some(item) = &$item {
+                    debug!("{} {}", self.context.name, $msg);
+                    let data = $transform(item.clone());
+                    if output.send(Ok(data)).await.is_err() {
+                        return false;
+                    }
+                }
+            };
+        }
+
+        // Send each item with Arc cloning instead of full data cloning
+        send_arc_item!(
+            self.state.header,
+            |h: FlvHeader| FlvData::Header(h),
+            "re-emit header after split"
+        );
+        send_arc_item!(
+            self.state.metadata,
+            |t: FlvTag| FlvData::Tag(t),
+            "re-emit metadata after split"
+        );
+        send_arc_item!(
+            self.state.video_sequence_tag,
+            |t: FlvTag| FlvData::Tag(t),
+            "re-emit video sequence tag after split"
+        );
+        send_arc_item!(
+            self.state.audio_sequence_tag,
+            |t: FlvTag| FlvData::Tag(t),
+            "re-emit audio sequence tag after split"
+        );
+
+        // Reset accumulated counters for the new segment
+        self.state.reset_counters();
+        self.last_split_time = Instant::now();
+
+        true
+    }
+}
+
+impl FlvOperator for LimitOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
         &mut self,
         input: AsyncReceiver<Result<FlvData, FlvError>>,
         output: AsyncSender<Result<FlvData, FlvError>>,
@@ -313,106 +419,8 @@ impl LimitOperator {
         debug!("{} completed.", self.context.name);
     }
 
-    /// Determine which limit triggered the split
-    fn determine_split_reason(&self) -> SplitReason {
-        let size_exceeded = self
-            .config
-            .max_size_bytes
-            .map(|max| self.state.accumulated_size >= max)
-            .unwrap_or(false);
-
-        let duration_exceeded = self
-            .config
-            .max_duration_ms
-            .map(|max| self.state.current_duration() >= max)
-            .unwrap_or(false);
-
-        match (size_exceeded, duration_exceeded) {
-            (true, true) => SplitReason::BothLimits,
-            (true, false) => SplitReason::SizeLimit,
-            (false, true) => SplitReason::DurationLimit,
-            _ => SplitReason::SizeLimit, // Default to size limit if somehow we get here
-        }
-    }
-
-    /// Check if any configured limit has been exceeded
-    fn check_limits(&self) -> bool {
-        // Check size limit if configured
-        if let Some(max_size) = self.config.max_size_bytes {
-            if self.state.accumulated_size >= max_size {
-                println!(
-                    "{} Size limit exceeded: {} bytes (max: {} bytes)",
-                    self.context.name, self.state.accumulated_size, max_size
-                );
-                return true;
-            }
-        }
-
-        // Check duration limit if configured
-        if let Some(max_duration) = self.config.max_duration_ms {
-            let current_duration = self.state.current_duration();
-            if current_duration >= max_duration {
-                println!(
-                    "{} Duration limit exceeded: {} ms (max: {} ms)",
-                    self.context.name, current_duration, max_duration
-                );
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Split the stream and re-emit headers
-    async fn split_stream(&mut self, output: &AsyncSender<Result<FlvData, FlvError>>) -> bool {
-        info!(
-            "{} Splitting stream at size={} bytes, duration={}ms (segment #{})",
-            self.context.name,
-            self.state.accumulated_size,
-            self.state.current_duration(),
-            self.state.split_count + 1
-        );
-
-        // Helper macro to reduce repetition when sending tags with Arc
-        macro_rules! send_arc_item {
-            ($item:expr, $transform:expr, $msg:expr) => {
-                if let Some(item) = &$item {
-                    debug!("{} {}", self.context.name, $msg);
-                    let data = $transform(item.clone());
-                    if output.send(Ok(data)).await.is_err() {
-                        return false;
-                    }
-                }
-            };
-        }
-
-        // Send each item with Arc cloning instead of full data cloning
-        send_arc_item!(
-            self.state.header,
-            |h: FlvHeader| FlvData::Header(h),
-            "re-emit header after split"
-        );
-        send_arc_item!(
-            self.state.metadata,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit metadata after split"
-        );
-        send_arc_item!(
-            self.state.video_sequence_tag,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit video sequence tag after split"
-        );
-        send_arc_item!(
-            self.state.audio_sequence_tag,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit audio sequence tag after split"
-        );
-
-        // Reset accumulated counters for the new segment
-        self.state.reset_counters();
-        self.last_split_time = Instant::now();
-
-        true
+    fn name(&self) -> &'static str {
+        "LimitOperator"
     }
 }
 

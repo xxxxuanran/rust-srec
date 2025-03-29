@@ -1,8 +1,32 @@
+//! # FLV Processing Pipeline
+//!
+//! This module implements a processing pipeline for fixing and optimizing FLV (Flash Video) streams.
+//! The pipeline consists of multiple operators that can transform, validate, and repair FLV data
+//! to ensure proper playability and standards compliance.
+//!
+//! ## Pipeline Architecture
+//!
+//! ```
+//! Input → Defragment → HeaderCheck → Split → GopSort → TimeConsistency →
+//!        TimingRepair → Limit → TimeConsistency2 → ScriptFilter → Output
+//! ```
+//!
+//! Each operator addresses specific issues that can occur in FLV streams:
+//!
+//! - **Defragment**: Handles fragmented streams by buffering and validating segments
+//! - **HeaderCheck**: Ensures streams begin with a valid FLV header
+//! - **Split**: Divides content at appropriate points for better playability
+//! - **GopSort**: Ensures video tags are properly ordered by GOP (Group of Pictures)
+//! - **TimeConsistency**: Maintains consistent timestamps throughout the stream
+//! - **TimingRepair**: Fixes timestamp anomalies like negative values or jumps
+//! - **Limit**: Enforces file size and duration limits
+//! - **ScriptFilter**: Removes or modifies problematic script tags
+
 use crate::context::StreamerContext;
 use crate::operators::limit::{self, LimitConfig};
 use crate::operators::{
-    ContinuityMode, DefragmentOperator, GopSortOperator, HeaderCheckOperator, LimitOperator,
-    RepairStrategy, ScriptFilterOperator, SplitOperator, TimeConsistencyOperator,
+    ContinuityMode, DefragmentOperator, FlvOperator, GopSortOperator, HeaderCheckOperator,
+    LimitOperator, RepairStrategy, ScriptFilterOperator, SplitOperator, TimeConsistencyOperator,
     TimingRepairConfig, TimingRepairOperator, defragment, time_consistency,
 };
 use bytes::buf::Limit;
@@ -34,16 +58,24 @@ pub struct PipelineConfig {
 
     /// Mode for timeline continuity
     pub continuity_mode: ContinuityMode,
+
+    /// Channel buffer capacity for each stage of the pipeline
+    pub channel_buffer_size: usize,
+
+    /// Whether to use adaptive buffer sizing
+    pub use_adaptive_buffers: bool,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             duplicate_tag_filtering: true,
-            file_size_limit: 6 * 1024 * 1024 * 1024, // 2 GB
+            file_size_limit: 6 * 1024 * 1024 * 1024, // 6 GB
             duration_limit: 0.0,
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
+            channel_buffer_size: 16, // Default buffer size
+            use_adaptive_buffers: false,
         }
     }
 }
@@ -77,20 +109,22 @@ impl FlvPipeline {
         let config = self.config.clone();
 
         // Create channels for all operators
-        let (defrag_tx, defrag_rx) = kanal::bounded_async(16);
-        let (header_check_tx, header_check_rx) = kanal::bounded_async(16);
-        let (limit_tx, limit_rx) = kanal::bounded_async(16);
-        let (gop_sort_tx, gop_sort_rx) = kanal::bounded_async(16);
-        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(16);
-        let (timing_repair_tx, timing_repair_rx) = kanal::bounded_async(16);
-        let (split_tx, split_rx) = kanal::bounded_async(16);
-        let (time_consistency_tx, time_consistency_rx) = kanal::bounded_async(16);
-        let (time_consistency_2_tx, time_consistency_2_rx) = kanal::bounded_async(16);
-        let (input_tx, input_rx) = kanal::bounded_async(16);
+        let (defrag_tx, defrag_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (header_check_tx, header_check_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (limit_tx, limit_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (gop_sort_tx, gop_sort_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (timing_repair_tx, timing_repair_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (split_tx, split_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (time_consistency_tx, time_consistency_rx) =
+            kanal::bounded_async(config.channel_buffer_size);
+        let (time_consistency_2_tx, time_consistency_2_rx) =
+            kanal::bounded_async(config.channel_buffer_size);
+        let (input_tx, input_rx) = kanal::bounded_async(config.channel_buffer_size);
 
         // Create all operators
-        let defrag_operator = DefragmentOperator::new(context.clone());
-        let header_check_operator = HeaderCheckOperator::new(context.clone());
+        let mut defrag_operator = DefragmentOperator::new(context.clone());
+        let mut header_check_operator = HeaderCheckOperator::new(context.clone());
         let limit_config = LimitConfig {
             max_size_bytes: if config.file_size_limit > 0 {
                 Some(config.file_size_limit)
@@ -108,13 +142,13 @@ impl FlvPipeline {
         };
         let mut limit_operator = LimitOperator::with_config(context.clone(), limit_config);
         let mut gop_sort_operator = GopSortOperator::new(context.clone());
-        let script_filter_operator = ScriptFilterOperator::new(context.clone());
-        let timing_repair_operator =
+        let mut script_filter_operator = ScriptFilterOperator::new(context.clone());
+        let mut timing_repair_operator =
             TimingRepairOperator::new(context.clone(), TimingRepairConfig::default());
-        let split_operator = SplitOperator::new(context.clone());
-        let time_consistency_operator =
+        let mut split_operator = SplitOperator::new(context.clone());
+        let mut time_consistency_operator =
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
-        let time_consistency_2_operator =
+        let mut time_consistency_2_operator =
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
 
         // Store all task handles
@@ -185,13 +219,15 @@ impl FlvPipeline {
     }
 }
 
+#[cfg(test)]
+/// Tests for the FLV processing pipeline
 mod test {
     use super::*;
     use bytes::{Buf, Bytes, BytesMut};
     use chrono::Local;
     use flv::data::FlvData;
     use flv::header::FlvHeader;
-    use flv::parser_async::FlvParser;
+    use flv::parser_async::{FlvDecoderStream, FlvParser};
     use flv::tag::{FlvTag, FlvTagType};
     use flv::writer::FlvWriter;
     use futures::StreamExt;
@@ -199,11 +235,15 @@ mod test {
     use std::path::Path;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
-    use tokio::sync::mpsc;
-    use tokio_stream::wrappers::ReceiverStream;
+
+    // Helper to initialize tracing for tests
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt::try_init();
+    }
 
     #[tokio::test]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
+        init_tracing(); // Initialize tracing for logging
         // Source and destination paths
         let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
         let output_dir = input_path.parent().unwrap().join("fix");
@@ -220,9 +260,6 @@ mod test {
         }
 
         let mut start_time = std::time::Instant::now(); // Start timer
-        // Open the input file
-        let file = File::open(input_path).await?;
-        let mut reader = BufReader::new(file);
 
         // Create the context
         let context = StreamerContext::default();
@@ -231,14 +268,10 @@ mod test {
         let pipeline = FlvPipeline::new(context);
 
         // Start a task to parse the input file
-        let decoder_stream = FlvParser::create_decoder_stream(input_path)
-            .await
-            .map_err(|e| {
-                FlvError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to open file: {}", e),
-                ))
-            })?;
+        let decoder_stream = FlvDecoderStream::with_capacity(
+            tokio::io::BufReader::new(tokio::fs::File::open(input_path).await?),
+            32 * 1024,
+        );
 
         // Create the input stream
         let input_stream = decoder_stream.boxed();
@@ -307,10 +340,10 @@ mod test {
         }
 
         // Flush and close the final writer
-        if let Some(mut writer) = current_writer {
-            writer.flush()?;
-            println!("Wrote {} tags to file {}", current_file_count, file_counter);
-        }
+        // if let Some(mut writer) = current_writer {
+        //     writer.flush()?;
+        //     println!("Wrote {} tags to file {}", current_file_count, file_counter);
+        // }
 
         println!("Processing completed in {:.2?}", start_time.elapsed());
 

@@ -38,7 +38,7 @@
 //! async fn example() {
 //!     let context = Arc::new(StreamerContext::default());
 //!     // Create with continuous timeline mode (default)
-//!     let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
+//!     let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 //!     
 //!     // Create channels for the pipeline
 //!     let (input_tx, input_rx) = kanal::bounded_async(32);
@@ -64,12 +64,13 @@
 //!
 
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::AsyncReceiver as Receiver;
 use kanal::AsyncSender as Sender;
-use log::{debug, info, warn};
+use tracing::{debug, info, warn};
 use std::cmp::min;
 use std::sync::Arc;
 
@@ -145,9 +146,40 @@ impl TimeConsistencyOperator {
         }
     }
 
-    /// Process method that receives FLV data, corrects timestamps, and forwards the data
-    pub async fn process(
-        &self,
+    /// Calculate timestamp offset based on continuity mode and current state
+    fn calculate_timestamp_offset(&self, state: &mut TimelineState) {
+        if let (Some(last), Some(first)) = (state.last_timestamp, state.first_timestamp_in_segment)
+        {
+            match self.continuity_mode {
+                ContinuityMode::Continuous => {
+                    // Make current segment continue from where the previous one ended
+                    state.timestamp_offset = last as i64 - first as i64 + 1;
+                    info!(
+                        "{} Maintaining continuous timeline: offset = {}ms",
+                        self.context.name, state.timestamp_offset
+                    );
+                }
+                ContinuityMode::Reset => {
+                    // Reset timeline - this means applying a negative offset to bring timestamps to zero
+                    state.timestamp_offset = -(first as i64);
+                    info!(
+                        "{} Resetting timeline to zero: offset = {}ms",
+                        self.context.name, state.timestamp_offset
+                    );
+                }
+            }
+        }
+        state.needs_offset_calculation = false;
+    }
+}
+
+impl FlvOperator for TimeConsistencyOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
         input: Receiver<Result<FlvData, FlvError>>,
         output: Sender<Result<FlvData, FlvError>>,
     ) {
@@ -272,30 +304,8 @@ impl TimeConsistencyOperator {
         debug!("{} Time consistency operator completed", self.context.name);
     }
 
-    /// Calculate timestamp offset based on continuity mode and current state
-    fn calculate_timestamp_offset(&self, state: &mut TimelineState) {
-        if let (Some(last), Some(first)) = (state.last_timestamp, state.first_timestamp_in_segment)
-        {
-            match self.continuity_mode {
-                ContinuityMode::Continuous => {
-                    // Make current segment continue from where the previous one ended
-                    state.timestamp_offset = last as i64 - first as i64 + 1;
-                    info!(
-                        "{} Maintaining continuous timeline: offset = {}ms",
-                        self.context.name, state.timestamp_offset
-                    );
-                }
-                ContinuityMode::Reset => {
-                    // Reset timeline - this means applying a negative offset to bring timestamps to zero
-                    state.timestamp_offset = -(first as i64);
-                    info!(
-                        "{} Resetting timeline to zero: offset = {}ms",
-                        self.context.name, state.timestamp_offset
-                    );
-                }
-            }
-        }
-        state.needs_offset_calculation = false;
+    fn name(&self) -> &'static str {
+        "TimeConsistencyOperator"
     }
 }
 
@@ -338,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn test_continuous_mode() {
         let context = create_test_context();
-        let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
+        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, output_rx) = kanal::bounded_async(32);
@@ -400,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_reset_mode() {
         let context = create_test_context();
-        let operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
+        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, output_rx) = kanal::bounded_async(32);
@@ -462,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_splits() {
         let context = create_test_context();
-        let operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
+        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
 
         let (input_tx, input_rx) = kanal::bounded_async(32);
         let (output_tx, output_rx) = kanal::bounded_async(32);

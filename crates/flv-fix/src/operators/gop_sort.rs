@@ -28,11 +28,12 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
-use log::{debug, info, trace};
+use tracing::{debug, info, trace};
 use std::sync::Arc;
 
 /// Threshold for special handling of small tag buffers
@@ -50,64 +51,6 @@ impl GopSortOperator {
             context,
             gop_tags: Vec::new(),
         }
-    }
-
-    /// Process incoming FLV data, sort and emit properly ordered GOP
-    pub async fn process(
-        &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    match &data {
-                        FlvData::Header(_) | FlvData::EndOfSequence(_) => {
-                            // Process any buffered tags first
-                            if !self.push_tags(&output).await {
-                                return;
-                            }
-
-                            // Forward the header or EOS
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-
-                            debug!("{} Reset GOP tags...", self.context.name);
-                        }
-                        FlvData::Tag(tag) => {
-                            let tag = tag.clone();
-
-                            if tag.is_key_frame() {
-                                // On keyframe, process buffered tags
-                                if !self.push_tags(&output).await {
-                                    return;
-                                }
-                                // Start the new buffer with this keyframe
-                                self.gop_tags.push(tag);
-                            } else {
-                                // Just add non-keyframe to buffer
-                                self.gop_tags.push(tag);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Push any buffered tags before forwarding the error
-                    self.push_tags(&output).await;
-
-                    // Forward the error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Process any remaining buffered tags at end of stream
-        self.push_tags(&output).await;
-
-        info!("{} GOP sort completed", self.context.name);
     }
 
     /// Process buffered tags and emit them in properly sorted order
@@ -238,6 +181,73 @@ impl GopSortOperator {
         }
 
         true
+    }
+}
+
+impl FlvOperator for GopSortOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
+    ) {
+        while let Ok(item) = input.recv().await {
+            match item {
+                Ok(data) => {
+                    match &data {
+                        FlvData::Header(_) | FlvData::EndOfSequence(_) => {
+                            // Process any buffered tags first
+                            if !self.push_tags(&output).await {
+                                return;
+                            }
+
+                            // Forward the header or EOS
+                            if output.send(Ok(data)).await.is_err() {
+                                return;
+                            }
+
+                            debug!("{} Reset GOP tags...", self.context.name);
+                        }
+                        FlvData::Tag(tag) => {
+                            let tag = tag.clone();
+
+                            if tag.is_key_frame() {
+                                // On keyframe, process buffered tags
+                                if !self.push_tags(&output).await {
+                                    return;
+                                }
+                                // Start the new buffer with this keyframe
+                                self.gop_tags.push(tag);
+                            } else {
+                                // Just add non-keyframe to buffer
+                                self.gop_tags.push(tag);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Push any buffered tags before forwarding the error
+                    self.push_tags(&output).await;
+
+                    // Forward the error
+                    if output.send(Err(e)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Process any remaining buffered tags at end of stream
+        self.push_tags(&output).await;
+
+        info!("{} GOP sort completed", self.context.name);
+    }
+
+    fn name(&self) -> &'static str {
+        "GopSortOperator"
     }
 }
 

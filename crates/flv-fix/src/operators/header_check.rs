@@ -31,11 +31,13 @@
 //! when insertion is needed.
 
 use crate::context::StreamerContext;
+use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use kanal;
-use log::warn;
+use kanal::{AsyncReceiver, AsyncSender};
+use tracing::warn;
 use std::sync::Arc;
 
 /// An operator that validates and ensures FLV streams have a proper header.
@@ -56,25 +58,17 @@ impl HeaderCheckOperator {
     pub fn new(context: Arc<StreamerContext>) -> Self {
         Self { context }
     }
+}
 
-    /// Process the input stream and ensure it starts with a valid FLV header.
-    /// If no header is present at the beginning, a default one will be inserted.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - The receiver channel for incoming FLV data
-    /// * `output` - The sender channel for validated output FLV data
-    ///
-    /// # Behavior
-    ///
-    /// - Monitors the first item in the stream
-    /// - If it's not a header, inserts a default one before forwarding the item
-    /// - Errors are passed through without header insertion
-    /// - All subsequent items are forwarded unchanged
-    pub async fn process(
-        &self,
-        input: kanal::AsyncReceiver<Result<FlvData, FlvError>>,
-        output: kanal::AsyncSender<Result<FlvData, FlvError>>,
+impl FlvOperator for HeaderCheckOperator {
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    async fn process(
+        &mut self,
+        input: AsyncReceiver<Result<FlvData, FlvError>>,
+        output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
         let mut first_item = true;
 
@@ -117,6 +111,10 @@ impl HeaderCheckOperator {
             }
         }
     }
+
+    fn name(&self) -> &'static str {
+        "HeaderCheckOperator"
+    }
 }
 
 #[cfg(test)]
@@ -149,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn test_with_header_present() {
         let context = create_test_context();
-        let operator = HeaderCheckOperator::new(context);
+        let mut operator = HeaderCheckOperator::new(context);
 
         let (input_tx, input_rx) = kanal::unbounded_async();
         let (output_tx, output_rx) = kanal::unbounded_async();
@@ -190,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_without_header() {
         let context = create_test_context();
-        let operator = HeaderCheckOperator::new(context);
+        let mut operator = HeaderCheckOperator::new(context);
 
         let (input_tx, input_rx) = kanal::unbounded_async();
         let (output_tx, output_rx) = kanal::unbounded_async();
@@ -230,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn test_with_error() {
         let context = create_test_context();
-        let operator = HeaderCheckOperator::new(context);
+        let mut operator = HeaderCheckOperator::new(context);
 
         let (input_tx, input_rx) = kanal::unbounded_async();
         let (output_tx, output_rx) = kanal::unbounded_async();
@@ -242,7 +240,7 @@ mod tests {
 
         // Send an error as the first item
         input_tx
-            .send(Err(FlvError::IoError(std::io::Error::new(
+            .send(Err(FlvError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Test error",
             ))))
