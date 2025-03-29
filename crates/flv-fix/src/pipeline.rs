@@ -229,14 +229,12 @@ mod test {
     use flv::header::FlvHeader;
     use flv::parser_async::{FlvDecoderStream, FlvParser};
     use flv::tag::{FlvTag, FlvTagType};
-    use flv::writer_async::FlvEncoder;
-    use futures::SinkExt;
+    use flv::writer::FlvWriter;
     use futures::StreamExt;
     use std::io::Cursor;
     use std::path::Path;
     use tokio::fs::File;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, AsyncWriteExt, BufWriter};
-    use tokio_util::codec::FramedWrite;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 
     // Helper to initialize tracing for tests
     fn init_tracing() {
@@ -261,7 +259,7 @@ mod test {
             return Ok(());
         }
 
-        let start_time = std::time::Instant::now(); // Start timer
+        let mut start_time = std::time::Instant::now(); // Start timer
 
         // Create the context
         let context = StreamerContext::default();
@@ -284,7 +282,7 @@ mod test {
         // Process and write results
         futures::pin_mut!(processed_stream);
 
-        let mut current_writer: Option<FramedWrite<BufWriter<File>, FlvEncoder>> = None;
+        let mut current_writer: Option<FlvWriter<std::fs::File>> = None;
         let mut file_counter = 0;
         let mut total_count = 0;
         let mut current_file_count = 0;
@@ -294,8 +292,7 @@ mod test {
                 Ok(FlvData::Header(header)) => {
                     // Close the current writer if it exists
                     if let Some(mut writer) = current_writer.take() {
-                        writer.flush().await?;
-                        writer.into_inner().flush().await?;
+                        writer.flush()?;
                         println!("Wrote {} tags to file {}", current_file_count, file_counter);
                         current_file_count = 0;
                     }
@@ -310,14 +307,8 @@ mod test {
 
                     println!("Creating new output file: {:?}", output_path);
 
-                    let file = File::create(&output_path).await?;
-                    let buffered_writer = BufWriter::new(file);
-                    let mut framed_writer = FramedWrite::new(buffered_writer, FlvEncoder::new());
-                    
-                    // Write the header
-                    framed_writer.send(FlvData::Header(header)).await?;
-                    
-                    current_writer = Some(framed_writer);
+                    let output_file = std::fs::File::create(&output_path)?;
+                    current_writer = Some(FlvWriter::new(output_file, &header)?);
                 }
                 Ok(FlvData::Tag(tag)) => {
                     // If we don't have a writer, create one with a default header
@@ -332,19 +323,13 @@ mod test {
                         println!("Creating initial output file: {:?}", output_path);
 
                         let default_header = FlvHeader::new(true, true);
-                        let file = File::create(&output_path).await?;
-                        let buffered_writer = BufWriter::new(file);
-                        let mut framed_writer = FramedWrite::new(buffered_writer, FlvEncoder::new());
-                        
-                        // Write the default header
-                        framed_writer.send(FlvData::Header(default_header)).await?;
-                        
-                        current_writer = Some(framed_writer);
+                        let output_file = std::fs::File::create(&output_path)?;
+                        current_writer = Some(FlvWriter::new(output_file, &default_header)?);
                     }
 
-                    // Write the tag using the async writer
+                    // Write the tag to the current writer
                     if let Some(writer) = &mut current_writer {
-                        writer.send(FlvData::Tag(tag)).await?;
+                        writer.write_tag(tag.tag_type, tag.data, tag.timestamp_ms)?;
                         total_count += 1;
                         current_file_count += 1;
                     }
@@ -355,11 +340,10 @@ mod test {
         }
 
         // Flush and close the final writer
-        if let Some(mut writer) = current_writer {
-            writer.flush().await?;
-            writer.into_inner().flush().await?;
-            println!("Wrote {} tags to file {}", current_file_count, file_counter);
-        }
+        // if let Some(mut writer) = current_writer {
+        //     writer.flush()?;
+        //     println!("Wrote {} tags to file {}", current_file_count, file_counter);
+        // }
 
         println!("Processing completed in {:.2?}", start_time.elapsed());
 
