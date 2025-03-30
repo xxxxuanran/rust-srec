@@ -27,3 +27,8 @@ tokio = { version = "1.36", features = ["full"] }
 [[bench]]
 name = "test_channels"
 harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
