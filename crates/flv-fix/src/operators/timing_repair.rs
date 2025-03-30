@@ -77,12 +77,11 @@ use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
-use tracing::{debug, info, warn};
-use tracing_subscriber::field::debug;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::f64;
 use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 /// The tolerance for timestamp correction due to floating point conversion errors
 /// Since millisecond precision (1/1000 of a second) can't exactly represent many common frame rates
@@ -338,21 +337,19 @@ impl TimingState {
     /// Check if a timestamp has rebounded (gone backward in time)
     fn is_timestamp_rebounded(&self, tag: &FlvTag) -> bool {
         let current = tag.timestamp_ms;
-        // warn!("Current timestamp: {}", current);
-        // warn!("Delta: {}", self.delta);
-        // warn!("Last tag timestamp: {:?}", self.last_tag.as_ref().map(|t| t.timestamp_ms));
-        // warn!("this tag is : {:?}", tag.tag_type);
-        let expected = current + self.delta as u32;
+        // Handle potential overflow when adding delta to current timestamp
+        let expected = if self.delta >= 0 {
+            current.saturating_add(self.delta as u32)
+        } else {
+            current.saturating_sub((-self.delta) as u32)
+        };
 
         if tag.is_audio_tag() {
             if let Some(ref last) = self.last_audio_tag {
                 if last.is_audio_sequence_header() {
                     expected < last.timestamp_ms
                 } else {
-                    // Account for rounding errors by checking if the timestamp is
-                    // within the expected range (last timestamp + expected interval +/- tolerance)
-                    let expected_interval = self.audio_sample_interval;
-                    let min_expected = last.timestamp_ms.saturating_sub(TOLERANCE);
+                    let min_expected = last.timestamp_ms;
 
                     expected <= min_expected
                 }
@@ -364,9 +361,7 @@ impl TimingState {
                 if last.is_video_sequence_header() {
                     expected < last.timestamp_ms
                 } else {
-                    // Account for rounding errors in frame timing
-                    let expected_interval = self.video_frame_interval;
-                    let min_expected = last.timestamp_ms.saturating_sub(TOLERANCE);
+                    let min_expected = last.timestamp_ms;
 
                     expected <= min_expected
                 }
@@ -386,7 +381,12 @@ impl TimingState {
 
         let last = self.last_tag.as_ref().unwrap();
         let current = tag.timestamp_ms;
-        let expected = current + self.delta as u32;
+
+        let expected = if self.delta >= 0 {
+            current.saturating_add(self.delta as u32)
+        } else {
+            current.saturating_sub((-self.delta) as u32)
+        };
 
         // Calculate the absolute difference between expected and last timestamp
         let diff = if expected > last.timestamp_ms {
@@ -434,6 +434,7 @@ impl TimingState {
     fn calculate_delta_correction(&mut self, tag: &FlvTag) -> i32 {
         let current = tag.timestamp_ms;
         let mut new_delta = self.delta;
+        let last_ts = self.last_tag.as_ref().map(|t| t.timestamp_ms).unwrap_or(0);
 
         if tag.is_video_tag() && self.last_video_tag.is_some() {
             let last_video = self.last_video_tag.as_ref().unwrap();
@@ -460,6 +461,46 @@ impl TimingState {
             // No type-specific last tag, use generic last tag
             let interval = max(self.video_frame_interval, self.audio_sample_interval);
             new_delta = (last.timestamp_ms + interval) as i32 - current as i32;
+        }
+
+        let expected = if new_delta >= 0 {
+            current.saturating_add(new_delta as u32)
+        } else {
+            current.saturating_sub((-new_delta) as u32)
+        };
+
+        if last_ts != 0 && expected <= last_ts {
+            // If the expected timestamp is still less than the last one, we need to adjust
+            // to avoid negative timestamps or rebounding
+            // in those cases, we use the last timestamp as a reference to calculate the delta
+            if tag.is_video_tag() {
+                // Use precise frame rate calculation
+                let exact_interval = 1000.0 / self.frame_rate;
+                // Round to nearest millisecond to avoid fractional timestamps
+                let adjusted_ts = (last_ts as f64 + exact_interval).round() as u32;
+                new_delta = if adjusted_ts >= current {
+                    (adjusted_ts - current) as i32
+                } else {
+                    -((current - adjusted_ts) as i32)
+                };
+            } else if tag.is_audio_tag() {
+                // calculate ideal next audio timestamp
+                let adjusted_ts = last_ts + self.audio_sample_interval;
+                new_delta = if adjusted_ts >= current {
+                    (adjusted_ts - current) as i32
+                } else {
+                    -((current - adjusted_ts) as i32)
+                };
+            } else {
+                // No type-specific last tag, use generic last tag
+                let interval = max(self.video_frame_interval, self.audio_sample_interval);
+                let adjusted_ts = last_ts + interval;
+                new_delta = if adjusted_ts >= current {
+                    (adjusted_ts - current) as i32
+                } else {
+                    -((current - adjusted_ts) as i32)
+                };
+            }
         }
 
         new_delta
@@ -693,8 +734,9 @@ impl TimingRepairOperator {
                             // Check for timestamp issues
                             let mut need_correction = false;
 
-                            // Check for timestamp rebounds with improved rounding error handling
+                            // Check for timestamp rebounds
                             if state.is_timestamp_rebounded(tag) {
+                                // warn!("rebounded tag is : {:?}", tag.tag_type);
                                 state.rebound_count += 1;
                                 let new_delta = state.calculate_delta_correction(tag);
 
@@ -706,7 +748,7 @@ impl TimingRepairOperator {
                                 state.delta = new_delta;
                                 need_correction = true;
                             }
-                            // Check for discontinuities with improved rounding error handling
+                            // Check for discontinuities
                             else if state.is_timestamp_discontinuous(tag, &self.config) {
                                 state.discontinuity_count += 1;
                                 let new_delta = state.calculate_delta_correction(tag);
