@@ -61,9 +61,6 @@ pub struct PipelineConfig {
 
     /// Channel buffer capacity for each stage of the pipeline
     pub channel_buffer_size: usize,
-
-    /// Whether to use adaptive buffer sizing
-    pub use_adaptive_buffers: bool,
 }
 
 impl Default for PipelineConfig {
@@ -75,7 +72,6 @@ impl Default for PipelineConfig {
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
             channel_buffer_size: 16, // Default buffer size
-            use_adaptive_buffers: false,
         }
     }
 }
@@ -223,43 +219,59 @@ impl FlvPipeline {
 /// Tests for the FLV processing pipeline
 mod test {
     use super::*;
-    use bytes::{Buf, Bytes, BytesMut};
+    use crate::context::StreamerContext;
+    use flv::writer_async::FlvEncoder;
+
     use chrono::Local;
     use flv::data::FlvData;
     use flv::header::FlvHeader;
-    use flv::parser_async::{FlvDecoderStream, FlvParser};
-    use flv::tag::{FlvTag, FlvTagType};
-    use flv::writer::FlvWriter;
+    use flv::parser_async::FlvDecoderStream;
     use futures::StreamExt;
-    use std::io::Cursor;
+    use futures::sink::SinkExt;
     use std::path::Path;
     use tokio::fs::File;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+    use tokio::io::BufWriter;
+    use tokio_util::codec::FramedWrite;
 
     // Helper to initialize tracing for tests
     fn init_tracing() {
-        let _ = tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer() // Write to test output
+            .try_init();
     }
+
+    // Define a type alias for the async writer stack
+    type AsyncFlvWriter = FramedWrite<BufWriter<tokio::fs::File>, FlvEncoder>;
 
     #[tokio::test]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
         init_tracing(); // Initialize tracing for logging
+
         // Source and destination paths
         let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
-        let output_dir = input_path.parent().unwrap().join("fix");
-        std::fs::create_dir_all(&output_dir).unwrap_or_else(|_| {
-            println!("Output directory already exists, using it.");
-        });
-        let base_name = input_path.file_name().unwrap().to_str().unwrap();
+        // let input_path = Path::new("E:/test/2024-12-21_00_06_24.flv");
+        let output_dir = input_path.parent().ok_or("Invalid input path")?.join("fix");
+        tokio::fs::create_dir_all(&output_dir)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = ?e, "Output directory creation failed or already exists");
+            });
+        let base_name = input_path
+            .file_name()
+            .ok_or("Cannot get filename")?
+            .to_str()
+            .ok_or("Filename not valid UTF-8")?;
         let extension = "flv";
 
         // Skip if test file doesn't exist
         if !input_path.exists() {
-            println!("Test file not found, skipping test");
+            tracing::info!(path = %input_path.display(), "Test file not found, skipping test");
             return Ok(());
         }
 
-        let mut start_time = std::time::Instant::now(); // Start timer
+        let start_time = std::time::Instant::now(); // Start timer
+        tracing::info!(path = %input_path.display(), "Starting FLV processing pipeline test");
 
         // Create the context
         let context = StreamerContext::default();
@@ -267,90 +279,165 @@ mod test {
         // Create the pipeline with default configuration
         let pipeline = FlvPipeline::new(context);
 
-        // Start a task to parse the input file
+        // Start a task to parse the input file using async Decoder
+        let file_reader = tokio::io::BufReader::new(tokio::fs::File::open(input_path).await?);
         let decoder_stream = FlvDecoderStream::with_capacity(
-            tokio::io::BufReader::new(tokio::fs::File::open(input_path).await?),
-            32 * 1024,
+            file_reader,
+            32 * 1024, // Input buffer capacity
         );
 
-        // Create the input stream
+        // Create the input stream for the pipeline
         let input_stream = decoder_stream.boxed();
 
-        // Process the stream
+        // Process the stream through the pipeline
         let processed_stream = pipeline.process(input_stream);
 
-        // Process and write results
+        // Pin the output stream so we can await items from it
         futures::pin_mut!(processed_stream);
 
-        let mut current_writer: Option<FlvWriter<std::fs::File>> = None;
+        // State for writing output files
+        let mut current_writer: Option<AsyncFlvWriter> = None;
         let mut file_counter = 0;
-        let mut total_count = 0;
-        let mut current_file_count = 0;
+        let mut total_tag_count = 0_u64;
+        let mut current_file_tag_count = 0_u64;
 
+        // Process results and write asynchronously
         while let Some(result) = processed_stream.next().await {
             match result {
                 Ok(FlvData::Header(header)) => {
-                    // Close the current writer if it exists
+                    tracing::debug!("Received Header - starting new file segment");
                     if let Some(mut writer) = current_writer.take() {
-                        writer.flush()?;
-                        println!("Wrote {} tags to file {}", current_file_count, file_counter);
-                        current_file_count = 0;
+                        tracing::debug!(
+                            tags = current_file_tag_count,
+                            file_num = file_counter,
+                            "Closing previous file"
+                        );
+                        // close() flushes the FramedWrite buffer and the underlying BufWriter
+                        writer.close().await?;
+                        tracing::info!(
+                            tags = current_file_tag_count,
+                            file_num = file_counter,
+                            "Closed previous file segment"
+                        );
                     }
 
-                    // Create a new file with timestamp
+                    // Reset tag count for the new file
+                    current_file_tag_count = 0;
                     file_counter += 1;
+
+                    // Create a new file path
                     let timestamp = Local::now().format("%Y%m%d_%H%M%S");
                     let output_path = output_dir.join(format!(
-                        "{}_{}_part{}.{}",
-                        base_name, timestamp, file_counter, extension
+                        "{}_part{}_{}.{}", // Changed naming slightly for clarity
+                        base_name.trim_end_matches(".flv"),
+                        file_counter,
+                        timestamp,
+                        extension
                     ));
 
-                    println!("Creating new output file: {:?}", output_path);
+                    tracing::info!(path = %output_path.display(), "Creating new output file");
 
-                    let output_file = std::fs::File::create(&output_path)?;
-                    current_writer = Some(FlvWriter::new(output_file, &header)?);
+                    // Create the file asynchronously
+                    let output_file = File::create(&output_path).await?;
+                    // Wrap in BufWriter
+                    let buf_writer = BufWriter::new(output_file);
+                    // Create the FramedWrite sink with the encoder
+                    let mut new_writer = FramedWrite::new(buf_writer, FlvEncoder::new());
+
+                    // Write the header to the new file
+                    new_writer.send(FlvData::Header(header)).await?;
+
+                    // Store the new writer
+                    current_writer = Some(new_writer);
                 }
                 Ok(FlvData::Tag(tag)) => {
-                    // If we don't have a writer, create one with a default header
+                    // If we somehow don't have a writer (e.g., stream didn't start with Header),
+                    // create one now with a default header. This might indicate a pipeline issue.
                     if current_writer.is_none() {
+                        tracing::warn!(
+                            "Received Tag before Header, creating file with default header"
+                        );
+                        // Reset tag count for the new file
+                        current_file_tag_count = 0;
                         file_counter += 1;
+
                         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
                         let output_path = output_dir.join(format!(
-                            "{}_{}_part{}.{}",
-                            base_name, timestamp, file_counter, extension
+                            "{}_part{}_{}_DEFHEAD.{}", // Mark as default header
+                            base_name.trim_end_matches(".flv"),
+                            file_counter,
+                            timestamp,
+                            extension
                         ));
 
-                        println!("Creating initial output file: {:?}", output_path);
+                        tracing::info!(path = %output_path.display(), "Creating initial output file (default header)");
 
-                        let default_header = FlvHeader::new(true, true);
-                        let output_file = std::fs::File::create(&output_path)?;
-                        current_writer = Some(FlvWriter::new(output_file, &default_header)?);
+                        let default_header = FlvHeader::new(true, true); // Assuming reasonable defaults
+                        let output_file = File::create(&output_path).await?;
+                        let buf_writer = BufWriter::new(output_file);
+                        let mut new_writer = FramedWrite::new(buf_writer, FlvEncoder::new());
+
+                        // Write the default header first
+                        new_writer.send(FlvData::Header(default_header)).await?;
+
+                        current_writer = Some(new_writer);
                     }
 
-                    // Write the tag to the current writer
+                    // Write the tag to the current writer using send()
                     if let Some(writer) = &mut current_writer {
-                        writer.write_tag(tag.tag_type, tag.data, tag.timestamp_ms)?;
-                        total_count += 1;
-                        current_file_count += 1;
+                        // The send method calls the FlvEncoder internally
+                        writer.send(FlvData::Tag(tag)).await?;
+                        total_tag_count += 1;
+                        current_file_tag_count += 1;
+
+                        // Log progress periodically
+                        if total_tag_count % 10000 == 0 {
+                            tracing::debug!(tags = total_tag_count, "Processed tags...");
+                        }
                     }
                 }
-                Err(e) => eprintln!("Error: {}", e),
-                _ => {}
+                Err(e) => {
+                    // Log errors from the pipeline stream
+                    tracing::error!(error = ?e, "Error received from pipeline stream");
+                    // Depending on the error, you might want to stop or continue
+                    // For this test, we'll log and continue, but this might hide issues.
+                }
+                // Handle other FlvData variants if the enum is extended
+                #[allow(unreachable_patterns)]
+                Ok(_) => { /* Ignore unknown variants for now */ }
             }
         }
 
-        // Flush and close the final writer
-        if let Some(mut writer) = current_writer {
-            writer.flush()?;
-            println!("Wrote {} tags to file {}", current_file_count, file_counter);
+        // Flush and close the final writer after the loop finishes
+        if let Some(mut writer) = current_writer.take() {
+            tracing::debug!(
+                tags = current_file_tag_count,
+                file_num = file_counter,
+                "Closing final file segment"
+            );
+            writer.close().await?; // Ensure all buffered data is written
+            tracing::info!(
+                tags = current_file_tag_count,
+                file_num = file_counter,
+                "Closed final file segment"
+            );
         }
 
-        println!("Processing completed in {:.2?}", start_time.elapsed());
+        let elapsed = start_time.elapsed();
+        tracing::info!(duration = ?elapsed, "Processing completed");
 
-        println!(
-            "Processed and wrote {} tags across {} files",
-            total_count, file_counter
+        tracing::info!(
+            total_tags = total_tag_count,
+            files_written = file_counter,
+            "Pipeline finished processing"
         );
+
+        // Basic assertions (optional, but good for tests)
+        assert!(
+            file_counter > 0,
+            "Expected at least one output file to be created"
+        );
+        assert!(total_tag_count > 0, "Expected tags to be processed");
 
         Ok(())
     }
