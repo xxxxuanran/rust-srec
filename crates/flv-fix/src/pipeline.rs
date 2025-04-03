@@ -8,7 +8,7 @@
 //!
 //! ```
 //! Input → Defragment → HeaderCheck → Split → GopSort → TimeConsistency →
-//!        TimingRepair → Limit → TimeConsistency2 → ScriptFilter → Output
+//!        TimingRepair → Limit → TimeConsistency2 → ScriptKeyframesFiller → ScriptFilter → Output
 //! ```
 //!
 //! Each operator addresses specific issues that can occur in FLV streams:
@@ -20,16 +20,18 @@
 //! - **TimeConsistency**: Maintains consistent timestamps throughout the stream
 //! - **TimingRepair**: Fixes timestamp anomalies like negative values or jumps
 //! - **Limit**: Enforces file size and duration limits
+//! - **ScriptKeyframesFiller**: Prepares metadata for proper seeking by adding keyframe placeholders
 //! - **ScriptFilter**: Removes or modifies problematic script tags
 
 use crate::context::StreamerContext;
 use crate::operators::limit::{self, LimitConfig};
+use crate::operators::script_filler::ScriptFillerConfig;
 use crate::operators::{
     ContinuityMode, DefragmentOperator, FlvOperator, GopSortOperator, HeaderCheckOperator,
-    LimitOperator, RepairStrategy, ScriptFilterOperator, SplitOperator, TimeConsistencyOperator,
-    TimingRepairConfig, TimingRepairOperator, defragment, time_consistency,
+    LimitOperator, RepairStrategy, ScriptFilterOperator, ScriptKeyframesFillerOperator,
+    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator, defragment,
+    time_consistency,
 };
-use bytes::buf::Limit;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use futures::FutureExt;
@@ -59,6 +61,9 @@ pub struct PipelineConfig {
     /// Mode for timeline continuity
     pub continuity_mode: ContinuityMode,
 
+    /// Configuration for keyframe index injection
+    pub keyframe_index_config: Option<ScriptFillerConfig>,
+
     /// Channel buffer capacity for each stage of the pipeline
     pub channel_buffer_size: usize,
 }
@@ -71,6 +76,7 @@ impl Default for PipelineConfig {
             duration_limit: 0.0,
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
+            keyframe_index_config: Some(ScriptFillerConfig::default()),
             channel_buffer_size: 16, // Default buffer size
         }
     }
@@ -116,6 +122,8 @@ impl FlvPipeline {
             kanal::bounded_async(config.channel_buffer_size);
         let (time_consistency_2_tx, time_consistency_2_rx) =
             kanal::bounded_async(config.channel_buffer_size);
+        let (keyframe_index_tx, keyframe_index_rx) =
+            kanal::bounded_async(config.channel_buffer_size);
         let (input_tx, input_rx) = kanal::bounded_async(config.channel_buffer_size);
 
         // Create all operators
@@ -147,8 +155,19 @@ impl FlvPipeline {
         let mut time_consistency_2_operator =
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
 
+        // Create the KeyframeIndexInjector operator if enabled
+        let mut keyframe_index_operator =
+            if let Some(keyframe_config) = config.keyframe_index_config {
+                Some(ScriptKeyframesFillerOperator::new(
+                    context.clone(),
+                    keyframe_config,
+                ))
+            } else {
+                None
+            };
+
         // Store all task handles
-        let mut task_handles: Vec<JoinHandle<()>> = Vec::with_capacity(10);
+        let mut task_handles: Vec<JoinHandle<()>> = Vec::with_capacity(11);
 
         // Input conversion task
         task_handles.push(tokio::spawn(async move {
@@ -193,11 +212,29 @@ impl FlvPipeline {
                 .process(limit_rx, time_consistency_2_tx)
                 .await;
         }));
-        task_handles.push(tokio::spawn(async move {
-            script_filter_operator
-                .process(time_consistency_2_rx, script_filter_tx)
-                .await;
-        }));
+
+        // Conditionally create ScriptKeyframesFillerOperator task based on configuration
+        if let Some(mut operator) = keyframe_index_operator {
+            task_handles.push(tokio::spawn(async move {
+                operator
+                    .process(time_consistency_2_rx, keyframe_index_tx)
+                    .await;
+            }));
+
+            // Script filter is the last operator in the pipeline
+            task_handles.push(tokio::spawn(async move {
+                script_filter_operator
+                    .process(keyframe_index_rx, script_filter_tx)
+                    .await;
+            }));
+        } else {
+            // If ScriptKeyframesFillerOperator is disabled, connect time_consistency_2 directly to script_filter
+            task_handles.push(tokio::spawn(async move {
+                script_filter_operator
+                    .process(time_consistency_2_rx, script_filter_tx)
+                    .await;
+            }));
+        }
 
         let output_stream = async_stream::stream! {
             loop {
@@ -220,18 +257,11 @@ impl FlvPipeline {
 mod test {
     use super::*;
     use crate::context::StreamerContext;
-    use flv::writer_async::FlvEncoder;
+    use crate::writer_task::FlvWriterTask;
 
-    use chrono::Local;
-    use flv::data::FlvData;
-    use flv::header::FlvHeader;
     use flv::parser_async::FlvDecoderStream;
     use futures::StreamExt;
-    use futures::sink::SinkExt;
     use std::path::Path;
-    use tokio::fs::File;
-    use tokio::io::BufWriter;
-    use tokio_util::codec::FramedWrite;
 
     // Helper to initialize tracing for tests
     fn init_tracing() {
@@ -241,15 +271,19 @@ mod test {
             .try_init();
     }
 
-    // Define a type alias for the async writer stack
-    type AsyncFlvWriter = FramedWrite<BufWriter<tokio::fs::File>, FlvEncoder>;
-
     #[tokio::test]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
         init_tracing(); // Initialize tracing for logging
 
         // Source and destination paths
         let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
+
+        // Skip if test file doesn't exist
+        if !input_path.exists() {
+            tracing::info!(path = %input_path.display(), "Test file not found, skipping test");
+            return Ok(());
+        }
+
         // let input_path = Path::new("E:/test/2024-12-21_00_06_24.flv");
         let output_dir = input_path.parent().ok_or("Invalid input path")?.join("fix");
         tokio::fs::create_dir_all(&output_dir)
@@ -258,17 +292,10 @@ mod test {
                 tracing::warn!(error = ?e, "Output directory creation failed or already exists");
             });
         let base_name = input_path
-            .file_name()
-            .ok_or("Cannot get filename")?
-            .to_str()
-            .ok_or("Filename not valid UTF-8")?;
-        let extension = "flv";
-
-        // Skip if test file doesn't exist
-        if !input_path.exists() {
-            tracing::info!(path = %input_path.display(), "Test file not found, skipping test");
-            return Ok(());
-        }
+            .file_stem()
+            .ok_or("No file stem")?
+            .to_string_lossy()
+            .to_string();
 
         let start_time = std::time::Instant::now(); // Start timer
         tracing::info!(path = %input_path.display(), "Starting FLV processing pipeline test");
@@ -292,152 +319,33 @@ mod test {
         // Process the stream through the pipeline
         let processed_stream = pipeline.process(input_stream);
 
-        // Pin the output stream so we can await items from it
-        futures::pin_mut!(processed_stream);
+        let mut writer_task = FlvWriterTask::new(output_dir, base_name).await?;
 
-        // State for writing output files
-        let mut current_writer: Option<AsyncFlvWriter> = None;
-        let mut file_counter = 0;
-        let mut total_tag_count = 0_u64;
-        let mut current_file_tag_count = 0_u64;
+        // Run the writer task, consuming the processed stream
+        writer_task.run(processed_stream).await?; // Propagate writer errors
 
-        // Process results and write asynchronously
-        while let Some(result) = processed_stream.next().await {
-            match result {
-                Ok(FlvData::Header(header)) => {
-                    tracing::debug!("Received Header - starting new file segment");
-                    if let Some(mut writer) = current_writer.take() {
-                        tracing::debug!(
-                            tags = current_file_tag_count,
-                            file_num = file_counter,
-                            "Closing previous file"
-                        );
-                        // close() flushes the FramedWrite buffer and the underlying BufWriter
-                        writer.close().await?;
-                        tracing::info!(
-                            tags = current_file_tag_count,
-                            file_num = file_counter,
-                            "Closed previous file segment"
-                        );
-                    }
+        let elapsed = start_time.elapsed();
+        tracing::info!(duration = ?elapsed, "Processing and writing completed.");
 
-                    // Reset tag count for the new file
-                    current_file_tag_count = 0;
-                    file_counter += 1;
-
-                    // Create a new file path
-                    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-                    let output_path = output_dir.join(format!(
-                        "{}_part{}_{}.{}", // Changed naming slightly for clarity
-                        base_name.trim_end_matches(".flv"),
-                        file_counter,
-                        timestamp,
-                        extension
-                    ));
-
-                    tracing::info!(path = %output_path.display(), "Creating new output file");
-
-                    // Create the file asynchronously
-                    let output_file = File::create(&output_path).await?;
-                    // Wrap in BufWriter
-                    let buf_writer = BufWriter::new(output_file);
-                    // Create the FramedWrite sink with the encoder
-                    let mut new_writer = FramedWrite::new(buf_writer, FlvEncoder::new());
-
-                    // Write the header to the new file
-                    new_writer.send(FlvData::Header(header)).await?;
-
-                    // Store the new writer
-                    current_writer = Some(new_writer);
-                }
-                Ok(FlvData::Tag(tag)) => {
-                    // If we somehow don't have a writer (e.g., stream didn't start with Header),
-                    // create one now with a default header. This might indicate a pipeline issue.
-                    if current_writer.is_none() {
-                        tracing::warn!(
-                            "Received Tag before Header, creating file with default header"
-                        );
-                        // Reset tag count for the new file
-                        current_file_tag_count = 0;
-                        file_counter += 1;
-
-                        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-                        let output_path = output_dir.join(format!(
-                            "{}_part{}_{}_DEFHEAD.{}", // Mark as default header
-                            base_name.trim_end_matches(".flv"),
-                            file_counter,
-                            timestamp,
-                            extension
-                        ));
-
-                        tracing::info!(path = %output_path.display(), "Creating initial output file (default header)");
-
-                        let default_header = FlvHeader::new(true, true); // Assuming reasonable defaults
-                        let output_file = File::create(&output_path).await?;
-                        let buf_writer = BufWriter::new(output_file);
-                        let mut new_writer = FramedWrite::new(buf_writer, FlvEncoder::new());
-
-                        // Write the default header first
-                        new_writer.send(FlvData::Header(default_header)).await?;
-
-                        current_writer = Some(new_writer);
-                    }
-
-                    // Write the tag to the current writer using send()
-                    if let Some(writer) = &mut current_writer {
-                        // The send method calls the FlvEncoder internally
-                        writer.send(FlvData::Tag(tag)).await?;
-                        total_tag_count += 1;
-                        current_file_tag_count += 1;
-
-                        // Log progress periodically
-                        if total_tag_count % 10000 == 0 {
-                            tracing::debug!(tags = total_tag_count, "Processed tags...");
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Log errors from the pipeline stream
-                    tracing::error!(error = ?e, "Error received from pipeline stream");
-                    // Depending on the error, you might want to stop or continue
-                    // For this test, we'll log and continue, but this might hide issues.
-                }
-                // Handle other FlvData variants if the enum is extended
-                #[allow(unreachable_patterns)]
-                Ok(_) => { /* Ignore unknown variants for now */ }
-            }
-        }
-
-        // Flush and close the final writer after the loop finishes
-        if let Some(mut writer) = current_writer.take() {
-            tracing::debug!(
-                tags = current_file_tag_count,
-                file_num = file_counter,
-                "Closing final file segment"
-            );
-            writer.close().await?; // Ensure all buffered data is written
-            tracing::info!(
-                tags = current_file_tag_count,
-                file_num = file_counter,
-                "Closed final file segment"
-            );
-        }
+        // Get stats from the writer task for assertions
+        let total_tags_written = writer_task.total_tags_written();
+        let files_created = writer_task.files_created();
 
         let elapsed = start_time.elapsed();
         tracing::info!(duration = ?elapsed, "Processing completed");
 
         tracing::info!(
-            total_tags = total_tag_count,
-            files_written = file_counter,
+            total_tags = total_tags_written,
+            files_written = files_created,
             "Pipeline finished processing"
         );
 
         // Basic assertions (optional, but good for tests)
         assert!(
-            file_counter > 0,
+            files_created > 0,
             "Expected at least one output file to be created"
         );
-        assert!(total_tag_count > 0, "Expected tags to be processed");
+        assert!(total_tags_written > 0, "Expected tags to be processed");
 
         Ok(())
     }
