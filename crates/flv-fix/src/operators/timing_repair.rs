@@ -938,7 +938,7 @@ mod tests {
         })
     }
 
-    fn create_script_tag_with_metadata(frameRate: f64, audioRate: f64) -> FlvData {
+    fn create_script_tag_with_metadata(frame_rate: f64, audio_rate: f64) -> FlvData {
         // This is a simplified version - in a real implementation we would create a proper AMF object
         let data = Vec::new(); // We would need to serialize AMF data here
         FlvData::Tag(FlvTag {
