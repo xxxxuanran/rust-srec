@@ -20,8 +20,13 @@ pub enum Amf0ReadError {
     /// A wrong type was encountered. Created when using
     /// `Amf0Decoder::next_with_type` and the next value is not the expected
     /// type.
-    #[error("wrong type: expected {0:?}, got {1:?}")]
-    WrongType(Amf0Marker, Amf0Marker),
+    #[error("wrong type: expected {expected:?}, got {got:?}")]
+    WrongType {
+        /// The expected type.
+        expected: Amf0Marker,
+        /// The actual type.
+        got: Amf0Marker,
+    },
 }
 
 /// Errors that can occur when encoding AMF0 data.
@@ -55,7 +60,10 @@ mod tests {
                 "unsupported type: Reference",
             ),
             (
-                Amf0ReadError::WrongType(Amf0Marker::Reference, Amf0Marker::Boolean),
+                Amf0ReadError::WrongType {
+                    expected: Amf0Marker::Reference,
+                    got: Amf0Marker::Boolean,
+                },
                 "wrong type: expected Reference, got Boolean",
             ),
             (
@@ -87,7 +95,10 @@ mod tests {
                 Amf0WriteError::Io(Cursor::new(Vec::<u8>::new()).read_u8().unwrap_err()),
                 "io error: failed to fill whole buffer",
             ),
-            (Amf0WriteError::NormalStringTooLong, "normal string too long"),
+            (
+                Amf0WriteError::NormalStringTooLong,
+                "normal string too long",
+            ),
         ];
 
         for (err, expected) in cases {

@@ -20,11 +20,13 @@ impl Amf0Encoder {
             Amf0Value::Number(val) => Self::encode_number(writer, *val),
             Amf0Value::String(val) => Self::encode_string(writer, val),
             Amf0Value::Object(val) => Self::encode_object(writer, val),
+            Amf0Value::StrictArray(val) => Self::encode_strict_array(writer, val),
             _ => Err(Amf0WriteError::UnsupportedType(value.marker())),
         }
     }
 
-    fn object_eof(writer: &mut impl io::Write) -> Result<(), Amf0WriteError> {
+    /// Write object end marker to signify the end of an AMF0 object
+    pub fn object_eof(writer: &mut impl io::Write) -> Result<(), Amf0WriteError> {
         writer.write_u24::<BigEndian>(Amf0Marker::ObjectEnd as u32)?;
         Ok(())
     }
@@ -74,6 +76,19 @@ impl Amf0Encoder {
         }
 
         Self::object_eof(writer)?;
+        Ok(())
+    }
+
+    /// Encode an AMF0 strict array
+    pub fn encode_strict_array(
+        writer: &mut impl io::Write,
+        values: &[Amf0Value<'_>],
+    ) -> Result<(), Amf0WriteError> {
+        writer.write_u8(Amf0Marker::StrictArray as u8)?;
+        writer.write_u32::<BigEndian>(values.len() as u32)?;
+        for value in values {
+            Self::encode(writer, value)?;
+        }
         Ok(())
     }
 }
@@ -165,7 +180,11 @@ mod tests {
         amf0_object.extend_from_slice(&[0x00, 0x00, 0x09]);
         let mut vec = Vec::<u8>::new();
 
-        Amf0Encoder::encode(&mut vec, &Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into())).unwrap();
+        Amf0Encoder::encode(
+            &mut vec,
+            &Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into()),
+        )
+        .unwrap();
         assert_eq!(vec, amf0_object);
     }
 
@@ -183,5 +202,56 @@ mod tests {
         let mut writer = Vec::<u8>::new();
         let result = Amf0Encoder::encode_string(&mut writer, &long_string);
         assert!(matches!(result, Err(Amf0WriteError::NormalStringTooLong)));
+    }
+
+    #[test]
+    fn test_encode_strict_array() {
+        let mut amf0_array = vec![Amf0Marker::StrictArray as u8, 0x00, 0x00, 0x00, 0x03]; // StrictArray marker with 3 elements
+        amf0_array.extend_from_slice(&[0x00]); // Number marker
+        amf0_array.extend_from_slice(&1.0_f64.to_be_bytes());
+        amf0_array.extend_from_slice(&[0x01, 0x01]); // Boolean true
+        amf0_array.extend_from_slice(&[0x02, 0x00, 0x04]); // String with 4 bytes
+        amf0_array.extend_from_slice(b"test");
+
+        let mut vec = Vec::<u8>::new();
+
+        Amf0Encoder::encode_strict_array(
+            &mut vec,
+            &[
+                Amf0Value::Number(1.0),
+                Amf0Value::Boolean(true),
+                Amf0Value::String(Cow::Borrowed("test")),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(vec, amf0_array);
+    }
+
+    #[test]
+    fn test_encode_generic_strict_array() {
+        let mut amf0_array = vec![Amf0Marker::StrictArray as u8, 0x00, 0x00, 0x00, 0x03]; // StrictArray marker with 3 elements
+        amf0_array.extend_from_slice(&[0x00]); // Number marker
+        amf0_array.extend_from_slice(&1.0_f64.to_be_bytes());
+        amf0_array.extend_from_slice(&[0x01, 0x01]); // Boolean true
+        amf0_array.extend_from_slice(&[0x02, 0x00, 0x04]); // String with 4 bytes
+        amf0_array.extend_from_slice(b"test");
+
+        let mut vec = Vec::<u8>::new();
+
+        Amf0Encoder::encode(
+            &mut vec,
+            &Amf0Value::StrictArray(
+                vec![
+                    Amf0Value::Number(1.0),
+                    Amf0Value::Boolean(true),
+                    Amf0Value::String(Cow::Borrowed("test")),
+                ]
+                .into(),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(vec, amf0_array);
     }
 }
