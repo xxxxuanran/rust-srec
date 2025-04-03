@@ -42,14 +42,12 @@
 //! MIT License
 
 use crate::header::FlvHeader;
-use crate::script::ScriptData;
-use crate::tag::{FlvTag, FlvTagOwned, FlvTagType};
+use crate::tag::{FlvTag, FlvTagType};
 use amf0::{Amf0Encoder, Amf0Value, Amf0WriteError};
 use byteorder::{BigEndian, WriteBytesExt};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Seek, Write};
 
 /// FLV Writer for creating FLV files
 pub struct FlvWriter<W: Write + Seek> {
@@ -242,6 +240,14 @@ impl<W: Write + Seek> FlvWriter<W> {
     /// Returns the current timestamp of the writer
     pub fn timestamp(&self) -> u32 {
         self.timestamp
+    }
+
+    /// Closes the writer, ensuring all data is flushed
+    ///
+    /// This method flushes any buffered data and returns the inner writer.
+    pub fn close(mut self) -> io::Result<W> {
+        self.flush()?;
+        Ok(self.writer)
     }
 }
 
