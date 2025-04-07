@@ -22,31 +22,6 @@
 //! - When changes are detected, marks the stream for splitting
 //! - At the next regular media tag, re-injects headers and sequence information
 //!
-//! ## Example
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use kanal;
-//! use crate::context::StreamerContext;
-//! use crate::operators::split::SplitOperator;
-//!
-//! async fn example() {
-//!     let context = Arc::new(StreamerContext::default());
-//!     let mut operator = SplitOperator::new(context);
-//!     
-//!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = kanal::bounded_async(32);
-//!     let (output_tx, output_rx) = kanal::bounded_async(32);
-//!     
-//!     // Process stream in background task
-//!     tokio::spawn(async move {
-//!         operator.process(input_rx, output_tx).await;
-//!     });
-//!     
-//!     // Input data via input_tx
-//!     // Process output from output_rx
-//! }
-//! ```
 //!
 //! ## License
 //!

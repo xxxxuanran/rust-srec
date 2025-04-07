@@ -1,11 +1,12 @@
 use std::io;
+use std::fmt;
 
 /// The `VideoFormat` is a nutype enum for `video_format` as defined in
 /// ISO/IEC-14496-10-2022 - E.2.1 Table E-2.
 ///
 /// Defaults to 5 (unspecified).
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum VideoFormat {
     /// The video type is component.
     Component = 0,
@@ -30,6 +31,23 @@ pub enum VideoFormat {
 
     /// The video type is Reserved.
     Reserved2 = 7,
+}
+
+// Implement Debug manually to ensure it includes the enum name in output
+impl fmt::Debug for VideoFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VideoFormat::")?;
+        match self {
+            Self::Component => write!(f, "Component"),
+            Self::PAL => write!(f, "PAL"),
+            Self::NTSC => write!(f, "NTSC"),
+            Self::SECAM => write!(f, "SECAM"),
+            Self::MAC => write!(f, "MAC"),
+            Self::Unspecified => write!(f, "Unspecified"),
+            Self::Reserved1 => write!(f, "Reserved1"),
+            Self::Reserved2 => write!(f, "Reserved2"),
+        }
+    }
 }
 
 impl TryFrom<u8> for VideoFormat {

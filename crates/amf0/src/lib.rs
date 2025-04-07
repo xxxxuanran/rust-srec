@@ -6,8 +6,8 @@
 //!
 //! ```rust
 //! # fn test() -> Result<(), Box<dyn std::error::Error>> {
-//! use scuffle_amf0::Amf0Decoder;
-//! use scuffle_amf0::Amf0Encoder;
+//! use amf0::Amf0Decoder;
+//! use amf0::Amf0Encoder;
 //! # let bytes = &[0x01, 0x01];
 //! # let mut writer = Vec::new();
 //!

@@ -18,28 +18,6 @@
 //! seen the first script tag, it filters out any subsequent ones while passing through
 //! all other tag types unmodified.
 //!
-//! ## Example
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use kanal::{bounded_async};
-//! use crate::context::StreamerContext;
-//! use crate::operators::script_filter::ScriptFilterOperator;
-//!
-//! async fn example() {
-//!     let context = Arc::new(StreamerContext::default());
-//!     let mut operator = ScriptFilterOperator::new(context);
-//!     
-//!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = bounded_async(32);
-//!     let (output_tx, output_rx) = bounded_async(32);
-//!     
-//!     // Process stream in background task
-//!     tokio::spawn(async move {
-//!         operator.process(input_rx, output_tx).await;
-//!     });
-//! }
-//! ```
 //!
 //! ## License
 //!

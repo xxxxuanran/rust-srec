@@ -25,10 +25,10 @@
 //! fn main() -> Result<()> {
 //!     // Create a new FLV file with both audio and video
 //!     let file = File::create("output.flv")?;
-//!     let mut writer = FlvWriter::new(file, true, true)?;
+//!     let mut writer = FlvWriter::new(file)?;
 //!
 //!     // Write metadata
-//!     writer.write_metadata("onMetaData", &[("duration", 60.0), ("width", 1280.0), ("height", 720.0)])?;
+//!     writer.write_metadata("onMetaData", &[("duration", 60.0), ("width", 1280.0), ("height", 720.0)]);
 //!
 //!     // Write video and audio tags
 //!     // ...

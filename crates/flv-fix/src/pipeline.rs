@@ -6,10 +6,8 @@
 //!
 //! ## Pipeline Architecture
 //!
-//! ```
 //! Input → Defragment → HeaderCheck → Split → GopSort → TimeConsistency →
 //!        TimingRepair → Limit → TimeConsistency2 → ScriptKeyframesFiller → ScriptFilter → Output
-//! ```
 //!
 //! Each operator addresses specific issues that can occur in FLV streams:
 //!

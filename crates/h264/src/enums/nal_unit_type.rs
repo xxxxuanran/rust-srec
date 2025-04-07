@@ -1,4 +1,5 @@
 use std::io;
+use std::fmt;
 
 /// NAL (Network Abstraction Layer) unit types as defined by ISO/IEC 14496-10:2022 (Table 7-1).
 ///
@@ -11,7 +12,7 @@ use std::io;
 /// ## IDR (Instantaneous Decoder Refresh) Pictures:
 /// - If `nal_unit_type` is **5**, the picture **must not contain** types **1-4**.
 /// - `IdrPicFlag` is **1** if `nal_unit_type == 5`, otherwise **0**.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum NALUnitType {
     /// Unspecified (not used in decoding)
     Unspecified1 = 0,
@@ -87,6 +88,40 @@ pub enum NALUnitType {
 
     /// Unspecified (application-defined use)
     Unspecified2 = 24,
+}
+
+// Implement Debug manually to ensure it includes the enum name in output
+impl fmt::Debug for NALUnitType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NALUnitType::")?;
+        match self {
+            Self::Unspecified1 => write!(f, "Unspecified1"),
+            Self::NonIDRSliceLayerWithoutPartitioning => write!(f, "NonIDRSliceLayerWithoutPartitioning"),
+            Self::SliceDataPartitionALayer => write!(f, "SliceDataPartitionALayer"),
+            Self::SliceDataPartitionBLayer => write!(f, "SliceDataPartitionBLayer"),
+            Self::SliceDataPartitionCLayer => write!(f, "SliceDataPartitionCLayer"),
+            Self::IDRSliceLayerWithoutPartitioning => write!(f, "IDRSliceLayerWithoutPartitioning"),
+            Self::SEI => write!(f, "SEI"),
+            Self::SPS => write!(f, "SPS"),
+            Self::PPS => write!(f, "PPS"),
+            Self::AccessUnitDelimiter => write!(f, "AccessUnitDelimiter"),
+            Self::EndOfSeq => write!(f, "EndOfSeq"),
+            Self::EndOfStream => write!(f, "EndOfStream"),
+            Self::FillerData => write!(f, "FillerData"),
+            Self::SPSExtension => write!(f, "SPSExtension"),
+            Self::PrefixNalUnit => write!(f, "PrefixNalUnit"),
+            Self::SubsetSPS => write!(f, "SubsetSPS"),
+            Self::DepthParameterSet => write!(f, "DepthParameterSet"),
+            Self::Reserved1 => write!(f, "Reserved1"),
+            Self::Reserved2 => write!(f, "Reserved2"),
+            Self::AuxCodedPictureSliceLayerWithoutPartitioning => write!(f, "AuxCodedPictureSliceLayerWithoutPartitioning"),
+            Self::SliceLayerExtension => write!(f, "SliceLayerExtension"),
+            Self::SliceLayerExtension2 => write!(f, "SliceLayerExtension2"),
+            Self::Reserved3 => write!(f, "Reserved3"),
+            Self::Reserved4 => write!(f, "Reserved4"),
+            Self::Unspecified2 => write!(f, "Unspecified2"),
+        }
+    }
 }
 
 impl TryFrom<u8> for NALUnitType {

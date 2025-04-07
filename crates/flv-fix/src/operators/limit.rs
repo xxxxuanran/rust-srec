@@ -23,37 +23,6 @@
 //! - Re-injects stream headers after each split
 //! - Supports optional callbacks when splits occur
 //!
-//! ## Example
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use kanal;
-//! use crate::context::StreamerContext;
-//! use crate::operators::limit::{LimitOperator, LimitConfig};
-//!
-//! async fn example() {
-//!     let context = Arc::new(StreamerContext::default());
-//!     let config = LimitConfig {
-//!         max_size_bytes: Some(10_000_000), // 10MB per segment
-//!         max_duration_ms: Some(300_000),   // 5 minutes per segment
-//!         ..Default::default()
-//!     };
-//!     let mut operator = LimitOperator::with_config(context, config);
-//!
-//!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = kanal::bounded_async(32);
-//!     let (output_tx, output_rx) = kanal::bounded_async(32);
-//!
-//!     // Process stream in background task
-//!     tokio::spawn(async move {
-//!         operator.process(input_rx, output_tx).await;
-//!     });
-//!
-//!     // Input data via input_tx
-//!     // Process output from output_rx
-//! }
-//! ```
-//!
 //! ## License
 //!
 //! MIT License

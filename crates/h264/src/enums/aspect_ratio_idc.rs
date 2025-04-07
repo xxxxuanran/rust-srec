@@ -1,3 +1,5 @@
+use std::fmt;
+
 /// The `AspectRatioIdc` is a nutype enum for `aspect_ratio_idc` as defined in
 /// ISO/IEC-14496-10-2022 - E.2.1 Table E-1.
 ///
@@ -12,7 +14,7 @@
 /// - `15` => 3:2
 /// - `16` => 2:1
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum AspectRatioIdc {
     /// 0: Unspecified (not used in decoding)
@@ -113,6 +115,34 @@ pub enum AspectRatioIdc {
 
     /// 255: Extended SAR (use `sar_width` & `sar_height` from bitstream)
     ExtendedSar = 255,
+}
+
+// Implement Debug manually to ensure it includes the enum name in output
+impl fmt::Debug for AspectRatioIdc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AspectRatioIdc::")?;
+        match self {
+            Self::Unspecified => write!(f, "Unspecified"),
+            Self::Square => write!(f, "Square"),
+            Self::Aspect12_11 => write!(f, "Aspect12_11"),
+            Self::Aspect10_11 => write!(f, "Aspect10_11"),
+            Self::Aspect16_11 => write!(f, "Aspect16_11"),
+            Self::Aspect40_33 => write!(f, "Aspect40_33"),
+            Self::Aspect24_11 => write!(f, "Aspect24_11"),
+            Self::Aspect20_11 => write!(f, "Aspect20_11"),
+            Self::Aspect32_11 => write!(f, "Aspect32_11"),
+            Self::Aspect80_33 => write!(f, "Aspect80_33"),
+            Self::Aspect18_11 => write!(f, "Aspect18_11"),
+            Self::Aspect15_11 => write!(f, "Aspect15_11"),
+            Self::Aspect64_33 => write!(f, "Aspect64_33"),
+            Self::Aspect160_99 => write!(f, "Aspect160_99"),
+            Self::Aspect4_3 => write!(f, "Aspect4_3"),
+            Self::Aspect3_2 => write!(f, "Aspect3_2"),
+            Self::Aspect2_1 => write!(f, "Aspect2_1"),
+            Self::Reserved => write!(f, "Reserved"),
+            Self::ExtendedSar => write!(f, "ExtendedSar"),
+        }
+    }
 }
 
 impl TryFrom<u8> for AspectRatioIdc {

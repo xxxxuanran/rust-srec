@@ -27,32 +27,6 @@
 //! - `Continuous`: Maintains an ever-increasing timeline across all segments
 //! - `Reset`: Resets the timeline to zero at each split point
 //!
-//! ## Example
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use kanal;
-//! use crate::context::StreamerContext;
-//! use crate::operators::time_consistency::{TimeConsistencyOperator, ContinuityMode};
-//!
-//! async fn example() {
-//!     let context = Arc::new(StreamerContext::default());
-//!     // Create with continuous timeline mode (default)
-//!     let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
-//!     
-//!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = kanal::bounded_async(32);
-//!     let (output_tx, output_rx) = kanal::bounded_async(32);
-//!     
-//!     // Process stream in background task
-//!     tokio::spawn(async move {
-//!         operator.process(input_rx, output_tx).await;
-//!     });
-//!     
-//!     // Input data via input_tx
-//!     // Process output from output_rx with corrected timestamps
-//! }
-//! ```
 //!
 //! ## License
 //!

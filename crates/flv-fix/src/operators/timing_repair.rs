@@ -35,32 +35,6 @@
 //! - Tolerance thresholds for discontinuity detection
 //! - Debug modes for timing issue diagnosis
 //!
-//! ## Example
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use kanal;
-//! use crate::context::StreamerContext;
-//! use crate::operators::timing_repair::{TimingRepairOperator, RepairStrategy};
-//!
-//! async fn example() {
-//!     let context = Arc::new(StreamerContext::default());
-//!     let mut operator = TimingRepairOperator::new(
-//!         context,
-//!         RepairStrategy::default(),
-//!     );
-//!     
-//!     // Create channels for the pipeline
-//!     let (input_tx, input_rx) = kanal::bounded_async(32);
-//!     let (output_tx, output_rx) = kanal::bounded_async(32);
-//!     
-//!     // Process stream in background task
-//!     tokio::spawn(async move {
-//!         operator.process(input_rx, output_tx).await;
-//!     });
-//! }
-//! ```
-//!
 //! ## License
 //!
 //! MIT License

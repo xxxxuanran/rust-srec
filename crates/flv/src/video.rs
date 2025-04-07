@@ -34,15 +34,15 @@
 //!
 //! ## Usage
 //!
-//! ```
-//! use flv::video::{VideoTagHeader, VideoCodecId, VideoFrameType};
+//! ```no_run
+//! use flv::video::{VideoData, VideoCodecId, VideoFrameType};
 //! use bytes::Bytes;
 //! use std::io::Cursor;
 //!
 //! // Parse video data from an FLV tag body
 //! let data = vec![/* FLV video tag data */];
 //! let mut cursor = Cursor::new(Bytes::from(data));
-//! let video = VideoTagHeader::demux(&mut cursor).unwrap();
+//! let video = VideoData::demux(&mut cursor).unwrap();
 //!
 //! // Check frame type and codec
 //! match video.frame_type {

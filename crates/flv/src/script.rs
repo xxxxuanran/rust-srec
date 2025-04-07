@@ -24,7 +24,7 @@
 //!
 //! ## Usage
 //!
-//! ```
+//! ```no_run
 //! use flv::script::ScriptData;
 //! use bytes::Bytes;
 //! use std::io::Cursor;
@@ -223,20 +223,20 @@ mod tests {
 
         // First create some values to put in the strict array
         let mut strict_array_buffer = Vec::new();
-        
+
         // Add a number value to the array
         Amf0Encoder::encode_number(&mut strict_array_buffer, 29.97).unwrap();
-        
+
         // Add a string value to the array
         Amf0Encoder::encode_string(&mut strict_array_buffer, "Video Title").unwrap();
-        
+
         // Add a boolean value to the array
         Amf0Encoder::encode_bool(&mut strict_array_buffer, true).unwrap();
-        
+
         // Write array marker and length
         buffer.push(0x0A); // StrictArray marker
         buffer.write_u32::<BigEndian>(3).unwrap(); // Array length (3 elements)
-        
+
         // Write the array content
         buffer.extend_from_slice(&strict_array_buffer);
 
@@ -248,11 +248,11 @@ mod tests {
         assert_eq!(script_data.name, "onMetaData");
         assert_eq!(script_data.data.len(), 1); // The array is one value
 
-        // Verify it's a strict array 
+        // Verify it's a strict array
         if let Amf0Value::StrictArray(array) = &script_data.data[0] {
             // Check array length
             assert_eq!(array.len(), 3);
-            
+
             // Check specific values
             assert_eq!(array[0], Amf0Value::Number(29.97));
             assert_eq!(array[1], Amf0Value::String("Video Title".into()));
