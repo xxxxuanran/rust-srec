@@ -146,7 +146,7 @@ impl FlvPipeline {
         let mut limit_operator = LimitOperator::with_config(context.clone(), limit_config);
         let mut gop_sort_operator = GopSortOperator::new(context.clone());
         let mut script_filter_operator = ScriptFilterOperator::new(context.clone());
-        let mut timing_repair_operator =
+        let timing_repair_operator =
             TimingRepairOperator::new(context.clone(), TimingRepairConfig::default());
         let mut split_operator = SplitOperator::new(context.clone());
         let mut time_consistency_operator =
@@ -155,15 +155,9 @@ impl FlvPipeline {
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
 
         // Create the KeyframeIndexInjector operator if enabled
-        let mut keyframe_index_operator =
-            if let Some(keyframe_config) = config.keyframe_index_config {
-                Some(ScriptKeyframesFillerOperator::new(
-                    context.clone(),
-                    keyframe_config,
-                ))
-            } else {
-                None
-            };
+        let keyframe_index_operator = config.keyframe_index_config.map(|keyframe_config| {
+            ScriptKeyframesFillerOperator::new(context.clone(), keyframe_config)
+        });
 
         // Store all task handles
         let mut task_handles: Vec<JoinHandle<()>> = Vec::with_capacity(11);
@@ -236,15 +230,13 @@ impl FlvPipeline {
         }
 
         let output_stream = async_stream::stream! {
-            loop {
-                match script_filter_rx.recv().await {
-                    Ok(result) => match result {
-                        Ok(data) => yield Ok(data),
-                        Err(e) => yield Err(e),
-                    },
-                    Err(_) => break, // Channel closed
+            while let Ok(result) = script_filter_rx.recv().await {
+                match result {
+                    Ok(data) => yield Ok(data),
+                    Err(e) => yield Err(e),
                 }
             }
+            // Channel closed when while loop exits
         };
 
         Box::pin(output_stream)

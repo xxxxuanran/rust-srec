@@ -32,12 +32,12 @@
 
 use std::{
     fs,
-    io::{self, Read, Seek, Write},
+    io::{self},
     path::PathBuf,
 };
 
 use chrono::Local;
-use flv::{data::FlvData, header::FlvHeader, tag::FlvTagData, writer::FlvWriter};
+use flv::{data::FlvData, header::FlvHeader, writer::FlvWriter};
 use tokio::task::spawn_blocking;
 use tokio_stream::StreamExt;
 use tracing::{debug, info};
@@ -107,7 +107,7 @@ impl FlvWriterTask {
             total_tag_count: 0,
             current_file_start_time: None,
             current_file_last_time: None,
-            analyzer: FlvAnalyzer::new(),
+            analyzer: FlvAnalyzer::default(),
             current_file_path: None, // Initialize to None
         })
     }

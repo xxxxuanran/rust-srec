@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::str::FromStr;
 
-use clap::CommandFactory;
-use clap::{Command, Parser, ValueEnum};
+use clap::Parser;
 use flv::data::FlvData;
 use flv::parser_async::FlvDecoderStream;
 use flv_fix::context::StreamerContext;
@@ -14,7 +12,7 @@ use flv_fix::writer_task::FlvWriterTask;
 use futures::StreamExt;
 use tokio::fs::File;
 use tokio::io::BufReader;
-use tracing::{Level, debug, error, info};
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 // Define CLI arguments
@@ -100,6 +98,7 @@ struct CliArgs {
 
 // Error types for parsing
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 enum ParseError {
     InvalidFormat,
     InvalidNumber,
@@ -304,7 +303,7 @@ async fn find_flv_files(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "flv") {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "flv") {
             files.push(path);
         }
     }
@@ -322,7 +321,7 @@ async fn process_inputs(
 
     // Collect all FLV files to process
     for input_path in inputs {
-        if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "flv") {
+        if input_path.is_file() && input_path.extension().is_some_and(|ext| ext == "flv") {
             files_to_process.push(input_path.clone());
         } else if input_path.is_dir() {
             let flv_files = find_flv_files(input_path).await?;
@@ -420,8 +419,8 @@ async fn main() {
     // Configure pipeline
     let config = PipelineConfig {
         duplicate_tag_filtering: args.filter_duplicates,
-        file_size_limit: file_size_limit,
-        duration_limit: duration_limit,
+        file_size_limit,
+        duration_limit,
         repair_strategy: RepairStrategy::Strict, // Fixed to Strict
         continuity_mode: flv_fix::operators::ContinuityMode::Reset, // Fixed to Reset
         keyframe_index_config: if args.keyframe_index {

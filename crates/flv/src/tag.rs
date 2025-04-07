@@ -129,13 +129,7 @@ impl FlvUtil<FlvTagOwned> for FlvTagOwned {
 
     fn is_key_frame(&self) -> bool {
         match self.data {
-            FlvTagData::Video(ref video_data) => {
-                if video_data.frame_type == VideoFrameType::KeyFrame {
-                    return true;
-                } else {
-                    return false;
-                }
-            }
+            FlvTagData::Video(ref video_data) => video_data.frame_type == VideoFrameType::KeyFrame,
             _ => false,
         }
     }
@@ -220,7 +214,7 @@ impl FlvUtil<FlvTag> for FlvTag {
                 let first_byte = bytes[0];
 
                 // Check if this is an enhanced type
-                let enhanced = (first_byte & 0b1000_0000) != 0;
+                // let enhanced = (first_byte & 0b1000_0000) != 0;
 
                 // For both legacy and enhanced, frame type is in bits 4-7
                 let frame_type = (first_byte >> 4) & 0x07;
@@ -241,13 +235,13 @@ impl FlvUtil<FlvTag> for FlvTag {
                 // for legacy formats, we detect the sequence header by checking the packet type
                 if !enhanced {
                     let video_packet_type = bytes.get(1).unwrap_or(&0) & 0x0F;
-                    return video_packet_type == 0x0;
+                    video_packet_type == 0x0
                 } else {
-                    let video_packet_type = bytes.get(0).unwrap_or(&0) & 0x0F;
+                    let video_packet_type = bytes.first().unwrap_or(&0) & 0x0F;
                     let video_packet_type = VideoPacketType::new(video_packet_type, enhanced);
                     match video_packet_type {
                         VideoPacketType::Enhanced(packet) => {
-                            return packet == EnhancedPacketType::SEQUENCE_START;
+                            packet == EnhancedPacketType::SEQUENCE_START
                         }
                         _ => false,
                     }
@@ -347,7 +341,7 @@ impl FlvTag {
         let data = self.data.clone();
         let mut reader = std::io::Cursor::new(data);
         // parse to owned version
-        return match VideoData::demux(&mut reader) {
+        match VideoData::demux(&mut reader) {
             Ok(video_data) => {
                 let body = video_data.body;
                 body.get_video_resolution().and_then(|res| {
@@ -362,7 +356,7 @@ impl FlvTag {
                 error!("Error parsing demuxing data: {}", e);
                 None
             }
-        };
+        }
     }
 
     pub fn get_video_codec_id(&self) -> Option<VideoCodecId> {
@@ -380,10 +374,10 @@ impl FlvTag {
         // for legacy formats, we detect the codec id by checking the packet type
         if !enhanced {
             let video_packet_type = first_byte & 0x0F;
-            return VideoCodecId::try_from(video_packet_type).ok();
+            VideoCodecId::try_from(video_packet_type).ok()
         } else {
             // unable to parse the codec id for enhanced formats
-            return None;
+            None
         }
     }
 
@@ -399,7 +393,7 @@ impl FlvTag {
         let first_byte = reader.get_u8();
         // check if this is an enhanced type
         let sound_format = (first_byte >> 4) & 0xF;
-        return SoundFormat::try_from(sound_format).ok();
+        SoundFormat::try_from(sound_format).ok()
     }
 
     /// Check if the tag is a key frame NALU
@@ -476,13 +470,13 @@ impl From<u8> for FlvTagType {
     }
 }
 
-impl Into<u8> for FlvTagType {
-    fn into(self) -> u8 {
-        match self {
+impl From<FlvTagType> for u8 {
+    fn from(value: FlvTagType) -> Self {
+        match value {
             FlvTagType::Audio => 8,
             FlvTagType::Video => 9,
             FlvTagType::ScriptData => 18,
-            FlvTagType::Unknown(value) => value,
+            FlvTagType::Unknown(val) => val,
         }
     }
 }

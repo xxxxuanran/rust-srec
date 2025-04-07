@@ -77,7 +77,7 @@ use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
-use std::cmp::{max, min};
+use std::cmp::max;
 use std::collections::HashMap;
 use std::f64;
 use std::sync::Arc;
@@ -132,37 +132,6 @@ impl Default for TimingRepairConfig {
             max_discontinuity: 1000, // 1 second
             debug: false,
         }
-    }
-}
-
-/// Helps maintain precise frame intervals with fractional milliseconds
-/// Avoids accumulating rounding errors from millisecond precision
-struct FrameRateTracker {
-    /// Frame rate in frames per second
-    fps: f64,
-    /// Accumulated fractional part (in milliseconds)
-    fractional_ms: f64,
-    /// Number of frames processed
-    frame_count: u32,
-    /// Base timestamp for calculating ideal positions
-    base_timestamp: u32,
-}
-
-impl FrameRateTracker {
-    fn new(fps: f64) -> Self {
-        Self {
-            fps,
-            fractional_ms: 0.0,
-            frame_count: 0,
-            base_timestamp: 0,
-        }
-    }
-
-    fn reset(&mut self, fps: f64, base_timestamp: u32) {
-        self.fps = fps;
-        self.fractional_ms = 0.0;
-        self.frame_count = 0;
-        self.base_timestamp = base_timestamp;
     }
 }
 
@@ -490,8 +459,10 @@ impl TimingRepairOperator {
 
     /// Create a new TimingRepairOperator with default configuration
     pub fn with_strategy(context: Arc<StreamerContext>, strategy: RepairStrategy) -> Self {
-        let mut config = TimingRepairConfig::default();
-        config.strategy = strategy;
+        let config = TimingRepairConfig {
+            strategy,
+            ..Default::default()
+        };
         Self { context, config }
     }
 

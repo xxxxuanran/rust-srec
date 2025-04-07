@@ -1,7 +1,5 @@
 use crate::data::FlvData;
-use crate::header::FlvHeader;
-use crate::tag::{FlvTag, FlvTagType}; // Assuming FlvTagType implements Into<u8>
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use std::io;
 use tokio_util::codec::Encoder;
 
@@ -26,16 +24,6 @@ pub struct FlvEncoder {
     last_tag_size_written: u32,
     /// Tracks if the FLV header has already been written.
     header_written: bool,
-}
-
-impl FlvEncoder {
-    /// Creates a new `FlvEncoder` instance with initial state.
-    pub fn new() -> Self {
-        Self {
-            last_tag_size_written: 0, // Initial PreviousTagSize is 0 before the first tag
-            header_written: false,
-        }
-    }
 }
 
 impl Encoder<FlvData> for FlvEncoder {
@@ -179,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_encode_header() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
         let mut buf = BytesMut::new();
 
@@ -203,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_encode_tag_without_header_fails() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let tag = FlvTag {
             tag_type: FlvTagType::Video,
             timestamp_ms: 100,
@@ -221,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_encode_header_twice_fails() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
         let mut buf = BytesMut::new();
 
@@ -244,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_encode_first_tag() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
         let tag = FlvTag {
             tag_type: FlvTagType::Video,
@@ -289,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_encode_second_tag() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
         let tag1 = FlvTag {
             tag_type: FlvTagType::Video,
@@ -344,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_encode_tag_data_too_large_fails() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
 
         // Create data larger than 24 bits can represent
@@ -369,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_extended() {
-        let mut encoder = FlvEncoder::new();
+        let mut encoder = FlvEncoder::default();
         let header = default_header();
         let large_timestamp = 0x12345678; // Example timestamp needing extended byte
         let tag = FlvTag {
@@ -468,7 +456,7 @@ async fn write_example() -> Result<(), Box<dyn Error>> {
 
     // 3. Create the FramedWrite sink using our FlvEncoder
     // Map the error type of the encoder if it doesn't match the stream's error type
-    let mut framed_writer = FramedWrite::new(writer, FlvEncoder::new())
+    let mut framed_writer = FramedWrite::new(writer, FlvEncoder::default())
                                .with(|err: io::Error| Box::new(err) as BoxedError); // Map sink error type
 
 

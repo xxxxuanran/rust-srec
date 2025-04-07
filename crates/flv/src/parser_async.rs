@@ -25,6 +25,7 @@ const TAG_HEADER_SIZE: usize = 11;
 const MIN_REQUIRED_AFTER_RESYNC: usize = TAG_HEADER_SIZE + PREV_TAG_SIZE_FIELD_SIZE;
 
 /// An FLV format decoder that implements Tokio's Decoder trait
+#[derive(Default)]
 pub struct FlvDecoder {
     header_parsed: bool,
 
@@ -37,14 +38,6 @@ pub struct FlvDecoder {
 }
 
 impl FlvDecoder {
-    pub fn new() -> Self {
-        Self {
-            header_parsed: false,
-            expecting_tag_header: true, // Start expecting the first tag header (no prev size after FLV header)
-            last_tag_size: 0,           // FLV header's "previous tag size" is 0
-        }
-    }
-
     // Helper function to attempt resynchronization by finding the next potential tag start
     // Returns true if resync advanced the buffer, false otherwise.
     fn try_resync(&mut self, src: &mut BytesMut) -> bool {
@@ -124,156 +117,155 @@ impl Decoder for FlvDecoder {
         }
 
         // --- Loop to handle multiple tags/skips within the available buffer ---
-        loop {
-            trace!(
-                "Decode loop iteration. Buffer size: {}. State: expecting_tag_header={}",
-                src.len(),
-                self.expecting_tag_header
-            );
 
-            // --- 2. Handle Previous Tag Size (if needed) ---
-            if !self.expecting_tag_header {
-                if src.len() < PREV_TAG_SIZE_FIELD_SIZE {
-                    trace!(
-                        "Awaiting PreviousTagSize field ({} bytes needed)",
-                        PREV_TAG_SIZE_FIELD_SIZE
-                    );
-                    src.reserve(PREV_TAG_SIZE_FIELD_SIZE - src.len());
-                    return Ok(None); // Need more data for the prev tag size
-                }
+        trace!(
+            "Decode loop iteration. Buffer size: {}. State: expecting_tag_header={}",
+            src.len(),
+            self.expecting_tag_header
+        );
 
-                // Read and potentially validate PreviousTagSize
-                // We create a slice without consuming yet, in case validation fails later
-                let prev_tag_size_bytes = &src[..PREV_TAG_SIZE_FIELD_SIZE];
-                let prev_tag_size = u32::from_be_bytes([
-                    prev_tag_size_bytes[0],
-                    prev_tag_size_bytes[1],
-                    prev_tag_size_bytes[2],
-                    prev_tag_size_bytes[3],
-                ]);
-
-                // Optional validation: Check if it matches the size of the *last* parsed tag.
-                // FLV muxers *should* set this correctly. Discrepancies indicate potential issues.
-                if self.last_tag_size > 0 && prev_tag_size != self.last_tag_size {
-                    warn!(
-                        "PreviousTagSize mismatch: Expected {}, found {}. Stream might be corrupted.",
-                        self.last_tag_size, prev_tag_size
-                    );
-                    // Decide whether to bail out or try to continue. Let's try to continue for now.
-                    // If we wanted strict checking, we could return Err here or trigger resync.
-                    // Investigation shows the some streams have this mismatch (script tags with incorrect size).
-                } else {
-                    trace!("Read PreviousTagSize: {}", prev_tag_size);
-                }
-
-                // Consume the PreviousTagSize field
-                src.advance(PREV_TAG_SIZE_FIELD_SIZE);
-                self.expecting_tag_header = true; // Now we expect the tag header
+        // --- 2. Handle Previous Tag Size (if needed) ---
+        if !self.expecting_tag_header {
+            if src.len() < PREV_TAG_SIZE_FIELD_SIZE {
+                trace!(
+                    "Awaiting PreviousTagSize field ({} bytes needed)",
+                    PREV_TAG_SIZE_FIELD_SIZE
+                );
+                src.reserve(PREV_TAG_SIZE_FIELD_SIZE - src.len());
+                return Ok(None); // Need more data for the prev tag size
             }
 
-            // --- 3. Parse Tag Header ---
-            if src.len() < TAG_HEADER_SIZE {
-                trace!("Awaiting Tag Header ({} bytes needed)", TAG_HEADER_SIZE);
-                // Try to reserve enough for header and potentially a small tag + next prev size
-                src.reserve(MIN_REQUIRED_AFTER_RESYNC.saturating_sub(src.len()));
-                return Ok(None); // Need more data for the tag header
-            }
-
-            // Peek at the tag header without consuming yet
-            let tag_type_byte = src[0];
-            let data_size_bytes = &src[1..4];
-            let data_size = u32::from_be_bytes([
-                0,
-                data_size_bytes[0],
-                data_size_bytes[1],
-                data_size_bytes[2],
+            // Read and potentially validate PreviousTagSize
+            // We create a slice without consuming yet, in case validation fails later
+            let prev_tag_size_bytes = &src[..PREV_TAG_SIZE_FIELD_SIZE];
+            let prev_tag_size = u32::from_be_bytes([
+                prev_tag_size_bytes[0],
+                prev_tag_size_bytes[1],
+                prev_tag_size_bytes[2],
+                prev_tag_size_bytes[3],
             ]);
 
-            // --- 4. Validate Tag Header ---
-            let tag_type = tag_type_byte & 0x1F; // Lower 5 bits for type (ignore filter bit for now)
-            if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            // Optional validation: Check if it matches the size of the *last* parsed tag.
+            // FLV muxers *should* set this correctly. Discrepancies indicate potential issues.
+            if self.last_tag_size > 0 && prev_tag_size != self.last_tag_size {
                 warn!(
-                    "Invalid tag type encountered: {}. Attempting resync.",
-                    tag_type_byte
+                    "PreviousTagSize mismatch: Expected {}, found {}. Stream might be corrupted.",
+                    self.last_tag_size, prev_tag_size
                 );
-                // Discard the single invalid byte and try resyncing
-                // src.advance(1);
-                // Now attempt resync on the rest
-                if !self.try_resync(src) {
-                    // Resync advanced the buffer. Return None to signal progress
-                    // but no complete frame yet from *this* specific call point.
-                    // The next call to decode will attempt parsing from the new position.
-                    return Ok(None);
-                } else {
-                    // Resync cleared the buffer or couldn't find anything.
-                    // Need more data. try_resync already reserved space.
-                    trace!("Resync failed or cleared buffer, returning None for more data.");
-                    return Ok(None);
-                }
+                // Decide whether to bail out or try to continue. Let's try to continue for now.
+                // If we wanted strict checking, we could return Err here or trigger resync.
+                // Investigation shows the some streams have this mismatch (script tags with incorrect size).
+            } else {
+                trace!("Read PreviousTagSize: {}", prev_tag_size);
             }
 
-            if data_size > MAX_TAG_DATA_SIZE {
-                warn!(
-                    "Unusually large tag data size: {} (max allowed: {}). Skipping tag header and attempting resync.",
-                    data_size, MAX_TAG_DATA_SIZE
-                );
-                // Discard the invalid tag header
-                src.advance(TAG_HEADER_SIZE);
-                self.last_tag_size = 0; // Lost context
-                // Return None here as well to indicate progress (skipping header)
-                // without producing a full item. Let the next call handle PreviousTagSize.
-                trace!("Skipped large tag header, returning None to yield.");
+            // Consume the PreviousTagSize field
+            src.advance(PREV_TAG_SIZE_FIELD_SIZE);
+            self.expecting_tag_header = true; // Now we expect the tag header
+        }
+
+        // --- 3. Parse Tag Header ---
+        if src.len() < TAG_HEADER_SIZE {
+            trace!("Awaiting Tag Header ({} bytes needed)", TAG_HEADER_SIZE);
+            // Try to reserve enough for header and potentially a small tag + next prev size
+            src.reserve(MIN_REQUIRED_AFTER_RESYNC.saturating_sub(src.len()));
+            return Ok(None); // Need more data for the tag header
+        }
+
+        // Peek at the tag header without consuming yet
+        let tag_type_byte = src[0];
+        let data_size_bytes = &src[1..4];
+        let data_size = u32::from_be_bytes([
+            0,
+            data_size_bytes[0],
+            data_size_bytes[1],
+            data_size_bytes[2],
+        ]);
+
+        // --- 4. Validate Tag Header ---
+        let tag_type = tag_type_byte & 0x1F; // Lower 5 bits for type (ignore filter bit for now)
+        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            warn!(
+                "Invalid tag type encountered: {}. Attempting resync.",
+                tag_type_byte
+            );
+            // Discard the single invalid byte and try resyncing
+            // src.advance(1);
+            // Now attempt resync on the rest
+            if !self.try_resync(src) {
+                // Resync advanced the buffer. Return None to signal progress
+                // but no complete frame yet from *this* specific call point.
+                // The next call to decode will attempt parsing from the new position.
+                return Ok(None);
+            } else {
+                // Resync cleared the buffer or couldn't find anything.
+                // Need more data. try_resync already reserved space.
+                trace!("Resync failed or cleared buffer, returning None for more data.");
                 return Ok(None);
             }
+        }
 
-            // --- 5. Check for Full Tag Data ---
-            let total_tag_size = TAG_HEADER_SIZE + data_size as usize;
-            if src.len() < total_tag_size {
+        if data_size > MAX_TAG_DATA_SIZE {
+            warn!(
+                "Unusually large tag data size: {} (max allowed: {}). Skipping tag header and attempting resync.",
+                data_size, MAX_TAG_DATA_SIZE
+            );
+            // Discard the invalid tag header
+            src.advance(TAG_HEADER_SIZE);
+            self.last_tag_size = 0; // Lost context
+            // Return None here as well to indicate progress (skipping header)
+            // without producing a full item. Let the next call handle PreviousTagSize.
+            trace!("Skipped large tag header, returning None to yield.");
+            return Ok(None);
+        }
+
+        // --- 5. Check for Full Tag Data ---
+        let total_tag_size = TAG_HEADER_SIZE + data_size as usize;
+        if src.len() < total_tag_size {
+            trace!(
+                "Awaiting full tag data ({} bytes needed, have {})",
+                total_tag_size,
+                src.len()
+            );
+            src.reserve(total_tag_size - src.len());
+            return Ok(None); // Need more data for the tag body
+        }
+
+        // --- 6. Demux Tag ---
+        // We have the full tag. Create a Bytes slice containing the *entire* tag.
+        let tag_bytes = src.split_to(total_tag_size).freeze();
+        // Cursor now owns the tag's Bytes
+        let mut cursor = Cursor::new(tag_bytes);
+
+        match FlvTag::demux(&mut cursor) {
+            // Use the FlvUtil<FlvTag> implementation
+            Ok(tag) => {
                 trace!(
-                    "Awaiting full tag data ({} bytes needed, have {})",
-                    total_tag_size,
-                    src.len()
+                    "Successfully parsed FLV tag: Type={}, Timestamp={}, Size={}",
+                    tag.tag_type, tag.timestamp_ms, data_size
                 );
-                src.reserve(total_tag_size - src.len());
-                return Ok(None); // Need more data for the tag body
+                // Store the *full* size of the tag (header + data) for the next PreviousTagSize check
+                self.last_tag_size = total_tag_size as u32;
+                // After a successful tag, we expect the PreviousTagSize field next
+                self.expecting_tag_header = false;
+                Ok(Some(FlvData::Tag(tag))) // Successfully decoded a tag
             }
-
-            // --- 6. Demux Tag ---
-            // We have the full tag. Create a Bytes slice containing the *entire* tag.
-            let tag_bytes = src.split_to(total_tag_size).freeze();
-            // Cursor now owns the tag's Bytes
-            let mut cursor = Cursor::new(tag_bytes);
-
-            match FlvTag::demux(&mut cursor) {
-                // Use the FlvUtil<FlvTag> implementation
-                Ok(tag) => {
-                    trace!(
-                        "Successfully parsed FLV tag: Type={}, Timestamp={}, Size={}",
-                        tag.tag_type, tag.timestamp_ms, data_size
-                    );
-                    // Store the *full* size of the tag (header + data) for the next PreviousTagSize check
-                    self.last_tag_size = total_tag_size as u32;
-                    // After a successful tag, we expect the PreviousTagSize field next
-                    self.expecting_tag_header = false;
-                    return Ok(Some(FlvData::Tag(tag))); // Successfully decoded a tag
-                }
-                Err(e) => {
-                    // Demux failed (e.g., bad data *within* the tag body, or unexpected EOF *within* demux)
-                    warn!(
-                        "Failed to demux FLV tag (type: {}, data_size: {}): {:?}. Discarded {} bytes.",
-                        tag_type, data_size, e, total_tag_size
-                    );
-                    // `split_to` already removed the bytes from `src`.
-                    // We failed parsing, so the next item should be PreviousTagSize, but we don't trust the stream.
-                    self.expecting_tag_header = false; // Expect PreviousTagSize next, potentially bad one
-                    self.last_tag_size = 0; // Can't trust the size
-                    // Return None to signal progress (discarded bad tag)
-                    // without producing a full item. Let the next call handle PreviousTagSize.
-                    trace!("Demux failed, returning None to yield after discarding tag.");
-                    return Ok(None);
-                }
+            Err(e) => {
+                // Demux failed (e.g., bad data *within* the tag body, or unexpected EOF *within* demux)
+                warn!(
+                    "Failed to demux FLV tag (type: {}, data_size: {}): {:?}. Discarded {} bytes.",
+                    tag_type, data_size, e, total_tag_size
+                );
+                // `split_to` already removed the bytes from `src`.
+                // We failed parsing, so the next item should be PreviousTagSize, but we don't trust the stream.
+                self.expecting_tag_header = false; // Expect PreviousTagSize next, potentially bad one
+                self.last_tag_size = 0; // Can't trust the size
+                // Return None to signal progress (discarded bad tag)
+                // without producing a full item. Let the next call handle PreviousTagSize.
+                trace!("Demux failed, returning None to yield after discarding tag.");
+                Ok(None)
             }
-        } // End loop
+        }
     }
 }
 
@@ -284,13 +276,13 @@ pub struct FlvDecoderStream<R> {
 impl<R: AsyncRead + Unpin> FlvDecoderStream<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            framed: FramedRead::with_capacity(reader, FlvDecoder::new(), BUFFER_SIZE),
+            framed: FramedRead::with_capacity(reader, FlvDecoder::default(), BUFFER_SIZE),
         }
     }
 
     pub fn with_capacity(reader: R, capacity: usize) -> Self {
         Self {
-            framed: FramedRead::with_capacity(reader, FlvDecoder::new(), capacity),
+            framed: FramedRead::with_capacity(reader, FlvDecoder::default(), capacity),
         }
     }
 }
@@ -337,7 +329,7 @@ mod tests {
     #[test]
     fn test_decode_header_ok() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::from(
             &[
                 0x46, 0x4C, 0x56, // "FLV"
@@ -369,7 +361,7 @@ mod tests {
     #[test]
     fn test_decode_header_incomplete() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::from(
             &[
                 0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, // Only 8 bytes
@@ -386,7 +378,7 @@ mod tests {
     #[test]
     fn test_decode_header_invalid() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::from(
             &[
                 0x46, 0x4C, 0x57, // Invalid signature 'W'
@@ -432,7 +424,7 @@ mod tests {
     #[test]
     fn test_decode_first_tag_ok() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::new();
 
         // 1. Provide Header
@@ -490,7 +482,7 @@ mod tests {
     #[test]
     fn test_decode_second_tag_after_prev_size() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::new();
 
         // --- Simulate state after first tag ---
@@ -535,7 +527,7 @@ mod tests {
     #[test]
     fn test_decode_invalid_tag_type_resync() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::new();
 
         // Simulate state after header
@@ -592,7 +584,7 @@ mod tests {
     #[test]
     fn test_decode_incomplete_tag_data_arrival() {
         init_tracing();
-        let mut decoder = FlvDecoder::new();
+        let mut decoder = FlvDecoder::default();
         let mut buffer = BytesMut::new();
 
         // Simulate state after header is parsed
@@ -853,7 +845,9 @@ mod tests {
 
                     println!(
                         "Async parser: Tag Type: {}, Timestamp: {}, Size: {}",
-                        tag.tag_type, tag.timestamp_ms, tag.data.len()
+                        tag.tag_type,
+                        tag.timestamp_ms,
+                        tag.data.len()
                     );
 
                     // Categorize the tag by type

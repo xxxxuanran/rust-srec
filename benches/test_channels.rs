@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use kanal;
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -13,6 +12,7 @@ const CHANNEL_CAPACITY: usize = 100;
 const NUM_OPERATORS: usize = 3;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum FlvTag {
     Audio { data: Bytes },
     Video { data: Bytes, keyframe: bool },
@@ -42,7 +42,7 @@ fn buffer_script_tags(tag: FlvTag, buffer: &mut Vec<FlvTag>) -> Option<Vec<FlvTa
     if let FlvTag::Script { ref data } = tag {
         buffer.push(tag.clone());
         if &data[..] == b"metadata complete" {
-            return Some(buffer.drain(..).collect());
+            return Some(std::mem::take(buffer));
         }
     }
     None
@@ -192,7 +192,7 @@ fn std_mpsc_pipeline() {
 }
 
 // **4. Tokio MPSC**
-fn tokio_mpsc_pipeline(rt :&Runtime) {
+fn tokio_mpsc_pipeline(rt: &Runtime) {
     rt.block_on(async {
         let (tx, mut rx) = tokio_mpsc::channel(CHANNEL_CAPACITY);
         let (final_tx, mut final_rx) = tokio_mpsc::channel(CHANNEL_CAPACITY);
@@ -323,11 +323,11 @@ fn kanal_pipeline() {
 fn benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("flv_processing");
-    group.bench_function("sync", |b| b.iter(|| sync_processing()));
-    group.bench_function("mutex_queue", |b| b.iter(|| shared_mutex_queue()));
-    group.bench_function("std_mpsc", |b| b.iter(|| std_mpsc_pipeline()));
+    group.bench_function("sync", |b| b.iter(sync_processing));
+    group.bench_function("mutex_queue", |b| b.iter(shared_mutex_queue));
+    group.bench_function("std_mpsc", |b| b.iter(std_mpsc_pipeline));
     group.bench_function("tokio_mpsc", |b| b.iter(|| tokio_mpsc_pipeline(&rt)));
-    group.bench_function("kanal", |b| b.iter(|| kanal_pipeline()));
+    group.bench_function("kanal", |b| b.iter(kanal_pipeline));
     group.finish();
 }
 

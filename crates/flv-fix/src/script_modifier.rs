@@ -21,24 +21,20 @@
 use std::{
     borrow::Cow,
     fs,
-    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    io::{self, BufReader, BufWriter, Seek, Write},
+    path::{Path, PathBuf},
 };
 
 use amf0::{Amf0Encoder, Amf0Marker, Amf0Value, write_amf_property_key};
 use byteorder::{BigEndian, WriteBytesExt};
 use chrono::Utc;
-use flv::{
-    tag::{FlvTagData, FlvTagType::ScriptData},
-    writer::FlvWriter,
-};
+use flv::tag::{FlvTagData, FlvTagType::ScriptData};
 use tracing::{debug, info, trace};
-use tracing_subscriber::field::debug;
 
 use crate::{
     analyzer::FlvStats,
     operators::script_filler::NATURAL_METADATA_KEY_ORDER,
-    utils::{self, create_backup, shift_content_backward, shift_content_forward, write_flv_tag},
+    utils::{self, shift_content_backward, shift_content_forward, write_flv_tag},
 };
 
 /// Error type for script modification operations
@@ -55,22 +51,21 @@ pub enum ScriptModifierError {
 /// Main function to update FLV file metadata based on collected statistics
 /// This is an async wrapper around the actual implementation
 pub async fn inject_stats_into_script_data(
-    file_path: &PathBuf,
+    file_path: &Path,
     stats: FlvStats,
 ) -> Result<(), ScriptModifierError> {
+    let file_path_clone = file_path.to_path_buf();
     // Use tokio's spawn_blocking to run the CPU-bound task on a separate thread
-    let file_path_clone = file_path.clone();
-    let result =
-        tokio::task::spawn_blocking(move || update_script_metadata(&file_path_clone, &stats))
-            .await
-            .map_err(|e| {
-                ScriptModifierError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Task join error: {}", e),
-                ))
-            })??;
+    tokio::task::spawn_blocking(move || update_script_metadata(&file_path_clone, &stats))
+        .await
+        .map_err(|e| {
+            ScriptModifierError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Task join error: {}", e),
+            ))
+        })??;
 
-    Ok(result)
+    Ok(())
 }
 
 /// Implementation function that actually does the metadata update work
@@ -112,7 +107,10 @@ fn update_script_metadata(
                 "Expected script data tag but found video data tag instead",
             ));
         }
-        FlvTagData::Unknown { tag_type, data } => {
+        FlvTagData::Unknown {
+            tag_type: _,
+            data: _,
+        } => {
             return Err(ScriptModifierError::ScriptData(
                 "Expected script data tag but found unknown tag type instead",
             ));
@@ -124,7 +122,7 @@ fn update_script_metadata(
     // The script data size is the size of the tag minus the header (11 bytes)
     let end_script_pos = reader.stream_position()?;
 
-    let original_payload_data = (end_script_pos as u64 - start_pos - 11) as u32;
+    let original_payload_data = (end_script_pos - start_pos - 11) as u32;
     debug!(
         "Original script data payload size: {}",
         original_payload_data
@@ -148,7 +146,7 @@ fn update_script_metadata(
         Amf0Encoder::encode_string(&mut buffer, "onMetaData").unwrap();
 
         for key in NATURAL_METADATA_KEY_ORDER.iter() {
-            match key.as_ref() {
+            match *key {
                 "duration" => {
                     let duration = stats.duration;
                     write_amf_property_key!(&mut buffer, key);
@@ -189,7 +187,7 @@ fn update_script_metadata(
                 "videocodecid" => {
                     write_amf_property_key!(&mut buffer, key);
 
-                    if let Some(codec_id) = stats.video_codec.clone() {
+                    if let Some(codec_id) = stats.video_codec {
                         Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64).unwrap();
                     } else {
                         let original_value =
@@ -203,7 +201,7 @@ fn update_script_metadata(
                 }
                 "audiocodecid" => {
                     write_amf_property_key!(&mut buffer, key);
-                    if let Some(codec_id) = stats.audio_codec.clone() {
+                    if let Some(codec_id) = stats.audio_codec {
                         Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64).unwrap();
                     } else {
                         let original_value =
@@ -229,7 +227,7 @@ fn update_script_metadata(
                 }
                 "hasKeyframes" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, stats.keyframes.len() > 0).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, !stats.keyframes.is_empty()).unwrap();
                 }
                 "canSeekToEnd" => {
                     write_amf_property_key!(&mut buffer, key);
@@ -300,7 +298,7 @@ fn update_script_metadata(
                 }
                 "metadatacreator" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_string(&mut buffer, "Srec".into()).unwrap();
+                    Amf0Encoder::encode_string(&mut buffer, "Srec").unwrap();
                 }
                 "metadatadate" => {
                     write_amf_property_key!(&mut buffer, key);
@@ -398,7 +396,7 @@ fn update_script_metadata(
                 );
             } else {
                 // New data is smaller - need to shift content backward
-                
+
                 // Write the new script tag header and data
                 write_flv_tag(&mut file, start_pos, ScriptData, &buffer, 0)?;
 

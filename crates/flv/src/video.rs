@@ -338,17 +338,11 @@ impl VideoTagBody {
         match self {
             VideoTagBody::Avc(avc_data) => {
                 // Check if the data is a sequence header
-                match avc_data {
-                    AvcPacket::SequenceHeader(_) => true,
-                    _ => false,
-                }
+                matches!(avc_data, AvcPacket::SequenceHeader(_))
             }
             VideoTagBody::Hevc(hevc_data) => {
                 // Check if the data is a sequence header
-                match hevc_data {
-                    HevcPacket::SequenceStart(_) => true,
-                    _ => false,
-                }
+                matches!(hevc_data, HevcPacket::SequenceStart(_))
             }
             _ => false,
         }

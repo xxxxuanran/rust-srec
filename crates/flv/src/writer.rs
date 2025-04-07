@@ -222,7 +222,7 @@ impl<W: Write + Seek> FlvWriter<W> {
 
         // Write script tag
         self.write_tag(FlvTagType::ScriptData, Bytes::from(buffer), 0)
-            .map_err(|e| Amf0WriteError::Io(e))
+            .map_err(Amf0WriteError::Io)
     }
 
     /// Writes video data to the output

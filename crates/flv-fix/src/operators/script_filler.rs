@@ -82,7 +82,6 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
-use tracing_subscriber::field::debug;
 
 const DEFAULT_KEYFRAME_INTERVAL_MS: u32 = (3.5 * 60.0 * 60.0 * 1000.0) as u32; // 3.5 hours in ms
 const MIN_INTERVAL_BETWEEN_KEYFRAMES_MS: u32 = 1900; // 1.9 seconds in ms
@@ -176,9 +175,10 @@ impl ScriptKeyframesFillerOperator {
                     estimated_size += TOTAL_NATURAL_METADATA_SIZE;
 
                     // keyframes count
-                    let keyframes_count =
-                        (self.config.keyframe_duration_ms + MIN_INTERVAL_BETWEEN_KEYFRAMES_MS - 1)
-                            / MIN_INTERVAL_BETWEEN_KEYFRAMES_MS;
+                    let keyframes_count = self
+                        .config
+                        .keyframe_duration_ms
+                        .div_ceil(MIN_INTERVAL_BETWEEN_KEYFRAMES_MS);
 
                     // the total size of keyframes arrays (times, filepositions)
                     let double_array_size = 2 * keyframes_count as usize;
@@ -196,7 +196,7 @@ impl ScriptKeyframesFillerOperator {
                         (9 * double_array_size) +               // Spacer array values (9 bytes each)
                         3; // Object end marker (3 bytes)
 
-                    estimated_size += keyframes_size as usize;
+                    estimated_size += keyframes_size;
 
                     debug!("Estimated script data size: {}", estimated_size);
 

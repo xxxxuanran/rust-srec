@@ -67,12 +67,12 @@ use crate::context::StreamerContext;
 use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
-use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use flv::tag::FlvUtil;
 use kanal::AsyncReceiver as Receiver;
 use kanal::AsyncSender as Sender;
 use std::cmp::min;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace};
 
 /// Defines how timestamps should be handled across stream splits
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -316,7 +316,10 @@ impl FlvOperator for TimeConsistencyOperator {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use flv::header::FlvHeader;
+    use flv::{
+        header::FlvHeader,
+        tag::{FlvTag, FlvTagType},
+    };
     use kanal;
 
     // Helper functions (similar to those in SplitOperator for consistency)

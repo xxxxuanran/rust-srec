@@ -443,7 +443,7 @@ impl AudioData {
         // Read the first byte to get the sound format
         let sound_format_byte = reader.read_u8()?;
 
-        let available_data = reader.get_ref().len() - start_pos as usize;
+        let available_data = reader.get_ref().len() - start_pos;
 
         // Ensure we have at least the first byte
         if available_data < 1 {
@@ -468,8 +468,8 @@ impl AudioData {
                 match audio_packet_type {
                     AudioPacketType::ModEx => {
                         // Process ModEx packets in a loop until we get a non-ModEx packet type
-                        let mut final_audio_packet_type = audio_packet_type;
-                        let mut audio_timestamp_nano_offset = 0u32;
+                        let mut _final_audio_packet_type = audio_packet_type;
+                        let mut _audio_timestamp_nano_offset = 0u32;
 
                         // Determine the size of the packet ModEx data (ranging from 1 to 256 bytes)
                         let mod_ex_data_size = (reader.read_u8()? as usize) + 1;
@@ -486,7 +486,7 @@ impl AudioData {
 
                         // Check the length of mod_ex_data once before entering the loop
                         if mod_ex_data.len() >= 3 {
-                            audio_timestamp_nano_offset = ((mod_ex_data[0] as u32) << 16)
+                            _audio_timestamp_nano_offset = ((mod_ex_data[0] as u32) << 16)
                                 | ((mod_ex_data[1] as u32) << 8)
                                 | (mod_ex_data[2] as u32);
                             // Note: The audio_timestamp_nano_offset could be stored in the AudioData struct
@@ -496,29 +496,29 @@ impl AudioData {
                         loop {
                             // Fetch the AudioPacketModExType
                             let next_byte = reader.read_u8()?;
-                            let audio_packet_mod_ex_type =
+                            let _audio_packet_mod_ex_type =
                                 AudioPacketModExType::try_from(next_byte >> 4)?;
                             let next_audio_packet_type =
                                 AudioPacketType::try_from(next_byte & 0x0F)?;
 
                             // Break the loop if the next packet type is not ModEx
                             if next_audio_packet_type != AudioPacketType::ModEx {
-                                final_audio_packet_type = next_audio_packet_type;
+                                _final_audio_packet_type = next_audio_packet_type;
                                 break;
                             }
                         }
 
                         // Continue with the final non-ModEx audio packet type
-                        let mut is_audio_multitrack = false;
-                        let mut audio_multitrack_type = AvMultitrackType::OneTrack;
-                        let mut audio_four_cc = None;
+                        let mut _is_audio_multitrack = false;
+                        let mut _audio_multitrack_type = AvMultitrackType::OneTrack;
+                        let mut _audio_four_cc = None;
 
-                        if final_audio_packet_type == AudioPacketType::Multitrack {
-                            is_audio_multitrack = true;
+                        if _final_audio_packet_type == AudioPacketType::Multitrack {
+                            _is_audio_multitrack = true;
 
                             // Read the multitrack type
                             let multitrack_type_byte = reader.read_u8()?;
-                            audio_multitrack_type =
+                            _audio_multitrack_type =
                                 AvMultitrackType::try_from(multitrack_type_byte & 0x0F)?;
 
                             // Fetch AudioPacketType for all audio tracks in the audio message
@@ -534,12 +534,12 @@ impl AudioData {
                                 ));
                             }
 
-                            final_audio_packet_type = new_packet_type;
+                            _final_audio_packet_type = new_packet_type;
 
-                            if audio_multitrack_type != AvMultitrackType::ManyTracksManyCodecs {
+                            if _audio_multitrack_type != AvMultitrackType::ManyTracksManyCodecs {
                                 // The tracks are encoded with the same codec, read the FOURCC for them
                                 let four_cc = reader.read_u32::<BigEndian>()?;
-                                audio_four_cc = match AudioFourCC::from_u32(four_cc) {
+                                _audio_four_cc = match AudioFourCC::from_u32(four_cc) {
                                     Ok(four_cc) => Some(four_cc),
                                     Err(e) => {
                                         return Err(io::Error::new(
@@ -552,13 +552,13 @@ impl AudioData {
                         } else {
                             // Not multitrack, read the FOURCC
                             let four_cc = reader.read_u32::<BigEndian>()?;
-                            audio_four_cc = Some(AudioFourCC::from_u32(four_cc)?);
+                            _audio_four_cc = Some(AudioFourCC::from_u32(four_cc)?);
                         }
 
                         // Now we're ready to process the audio body based on final_audio_packet_type
                         // For now, we'll just return a placeholder
 
-                        AudioPacket::AudioPacketType(final_audio_packet_type)
+                        AudioPacket::AudioPacketType(_final_audio_packet_type)
                     }
                     // Other audio packet types, not implemented yet
                     other => AudioPacket::AudioPacketType(other),
@@ -580,7 +580,7 @@ impl AudioData {
 
         // flv audio header
         let audio_header = AudioHeader {
-            sound_format: sound_format,
+            sound_format,
             packet: audio_packet,
         };
 
@@ -591,7 +591,7 @@ impl AudioData {
     }
 
     fn read_remaining(reader: &mut io::Cursor<Bytes>, size: Option<usize>) -> io::Result<Bytes> {
-        Ok(if size == None || size.unwrap() == 0 {
+        Ok(if size.is_none() || size.unwrap() == 0 {
             // if size is 0, read until the end of the stream
             reader.extract_remaining()
         } else {

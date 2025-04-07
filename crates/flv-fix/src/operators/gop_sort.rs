@@ -31,7 +31,7 @@ use crate::context::StreamerContext;
 use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
-use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use flv::tag::{FlvTag, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::{debug, info, trace};

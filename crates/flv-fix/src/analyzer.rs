@@ -2,11 +2,11 @@ use flv::{
     audio::{AudioTagUtils, SoundFormat, SoundRate, SoundSize, SoundType},
     header::FlvHeader,
     resolution::Resolution,
-    tag::{FlvTag, FlvTagData, FlvUtil},
+    tag::{FlvTag, FlvUtil},
     video::VideoCodecId,
 };
 
-use std::{fmt, io::Cursor};
+use std::fmt;
 use tracing::{debug, error};
 
 use crate::utils::{FLV_HEADER_SIZE, FLV_PREVIOUS_TAG_SIZE, FLV_TAG_HEADER_SIZE};
@@ -53,8 +53,8 @@ pub struct FlvStats {
     pub keyframes: Vec<(f64, u64)>,
 }
 
-impl FlvStats {
-    pub fn new() -> Self {
+impl Default for FlvStats {
+    fn default() -> Self {
         Self {
             file_size: 0,
             duration: 0,
@@ -87,29 +87,31 @@ impl FlvStats {
             audio_data_rate: 0.0,
         }
     }
+}
 
+impl FlvStats {
     pub fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self::default();
     }
 
     pub fn calculate_frame_rate(&self) -> f32 {
-        if self.last_timestamp <= 0 {
+        if self.last_timestamp == 0 {
             return 0.0;
         }
         let duration_in_seconds =
-            self.last_video_timestamp - self.first_keyframe_timestamp.unwrap_or(0).min(0);
+            self.last_video_timestamp - self.first_keyframe_timestamp.unwrap_or(0);
         (self.video_tag_count as f32) * 1000.0 / duration_in_seconds as f32
     }
 
     pub fn calculate_video_bitrate(&self) -> f32 {
-        if self.last_timestamp <= 0 {
+        if self.last_timestamp == 0 {
             return 0.0;
         }
         (self.video_data_size as f32) * 8.0 / self.last_timestamp as f32
     }
 
     pub fn calculate_audio_bitrate(&self) -> f32 {
-        if self.last_timestamp <= 0 {
+        if self.last_timestamp == 0 {
             return 0.0;
         }
         (self.audio_data_size as f32) * 8.0 / self.last_timestamp as f32
@@ -240,6 +242,7 @@ impl fmt::Display for FlvStats {
     }
 }
 
+#[derive(Default)]
 pub struct FlvAnalyzer {
     pub stats: FlvStats,
 
@@ -249,15 +252,6 @@ pub struct FlvAnalyzer {
 }
 
 impl FlvAnalyzer {
-    pub fn new() -> Self {
-        Self {
-            stats: FlvStats::new(),
-            header_analyzed: false,
-            has_video_sequence_header: false,
-            has_audio_sequence_header: false,
-        }
-    }
-
     pub fn reset(&mut self) {
         self.stats.reset();
         self.header_analyzed = false;
@@ -374,8 +368,8 @@ impl FlvAnalyzer {
         let data_size = tag.data.len() as u64;
         self.stats.video_tag_count += 1;
         self.stats.video_tags_size +=
-            data_size as u64 + FLV_TAG_HEADER_SIZE as u64 + FLV_PREVIOUS_TAG_SIZE as u64; // 11 bytes for header
-        self.stats.video_data_size += data_size as u64;
+            data_size + FLV_TAG_HEADER_SIZE as u64 + FLV_PREVIOUS_TAG_SIZE as u64; // 11 bytes for header
+        self.stats.video_data_size += data_size;
         self.stats.last_video_timestamp = timestamp;
     }
 
@@ -393,9 +387,9 @@ impl FlvAnalyzer {
         let data_size = tag.data.len() as u64;
 
         self.stats.tag_count += 1;
-        self.stats.tags_size += data_size as u64;
+        self.stats.tags_size += data_size;
         self.stats.file_size +=
-            data_size as u64 + FLV_TAG_HEADER_SIZE as u64 + FLV_PREVIOUS_TAG_SIZE as u64; // 11 bytes for header
+            data_size + FLV_TAG_HEADER_SIZE as u64 + FLV_PREVIOUS_TAG_SIZE as u64; // 11 bytes for header
 
         self.stats.last_timestamp = tag.timestamp_ms;
 
@@ -429,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_analyze_header() {
-        let mut analyzer = FlvAnalyzer::new();
+        let mut analyzer = FlvAnalyzer::default();
         let header = FlvHeader::new(true, true);
         assert!(analyzer.analyze_header(&header).is_ok());
         assert_eq!(analyzer.stats.file_size, 13); // 9 bytes for header + 4 bytes for previous tag size

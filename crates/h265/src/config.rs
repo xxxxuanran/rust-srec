@@ -2,7 +2,7 @@ use std::io::{
     Read, Write, {self},
 };
 
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use bytes_util::{BitReader, BitWriter};
 

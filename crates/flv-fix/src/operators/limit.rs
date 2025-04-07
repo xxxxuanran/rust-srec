@@ -65,15 +65,14 @@
 
 use crate::context::StreamerContext;
 use crate::operators::FlvOperator;
-use bytes::{Bytes, BytesMut};
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
-use flv::tag::{FlvTag, FlvTagType, FlvUtil};
+use flv::tag::{FlvTag, FlvUtil};
 use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use std::time::Instant;
+use tracing::{debug, info};
 
 /// Reason for a stream split
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,7 +309,6 @@ impl FlvOperator for LimitOperator {
                             }
                         }
                         FlvData::Tag(tag) => {
-                            
                             // Update size counter
                             let tag_size = tag.size() as u64;
                             self.state.accumulated_size += tag_size;
@@ -370,6 +368,7 @@ impl FlvOperator for LimitOperator {
 
                                 // Emit current tag after the split if it's a keyframe
                                 if tag.is_key_frame() || !self.config.split_at_keyframes_only {
+                                    #[allow(clippy::collapsible_if)]
                                     if output.send(Ok(data.clone())).await.is_err() {
                                         return;
                                     }

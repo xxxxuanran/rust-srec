@@ -91,7 +91,7 @@ impl FlvHeaderReader for io::Cursor<Bytes> {
 }
 
 // Implement for Cursor<&[u8]> (new implementation)
-impl<'a> FlvHeaderReader for io::Cursor<&'a [u8]> {
+impl FlvHeaderReader for io::Cursor<&[u8]> {
     fn read_signature(&mut self) -> io::Result<u32> {
         self.read_u24::<BigEndian>()
     }
@@ -129,8 +129,8 @@ impl FlvHeader {
         FlvHeader {
             signature: 0x464C56, // "FLV" in hex
             version: 0x01,
-            has_audio: has_audio,
-            has_video: has_video,
+            has_audio,
+            has_video,
             data_offset: Bytes::new(),
         }
     }
@@ -144,7 +144,7 @@ impl FlvHeader {
     /// This function can return an `io::Error` if buffer is not enough or if the header is invalid.
     /// Arguments:
     /// - `reader`: A mutable reference to a reader implementing the FlvHeaderReader trait.
-    /// The reader will be advanced to the end of the header.
+    ///     The reader will be advanced to the end of the header.
     pub fn parse<R: FlvHeaderReader>(reader: &mut R) -> io::Result<Self> {
         let start = reader.get_position();
 
