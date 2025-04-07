@@ -144,7 +144,7 @@ impl FlvHeader {
     /// This function can return an `io::Error` if buffer is not enough or if the header is invalid.
     /// Arguments:
     /// - `reader`: A mutable reference to a reader implementing the FlvHeaderReader trait.
-    ///     The reader will be advanced to the end of the header.
+    ///   The reader will be advanced to the end of the header.
     pub fn parse<R: FlvHeaderReader>(reader: &mut R) -> io::Result<Self> {
         let start = reader.get_position();
 
