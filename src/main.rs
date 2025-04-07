@@ -356,23 +356,9 @@ async fn process_inputs(
 
 #[tokio::main]
 async fn main() {
-    // Parse command-line arguments, show help on error
-    let args = match CliArgs::try_parse() {
-        Ok(args) => args,
-        Err(e) => {
-            // If the error is that help was requested, just exit (clap handles the help display)
-            if e.kind() == clap::error::ErrorKind::DisplayHelp {
-                exit(0);
-            }
-
-            // For other errors, show a more helpful message
-            // let mut cmd = CliArgs::command();
-            eprintln!("{}\n", e);
-            // eprintln!("For more information, try '--help'");
-            // eprintln!("\nUsage: {}", cmd.render_usage());
-            exit(1);
-        }
-    };
+    // Parse command-line arguments
+    // Using parse() instead of try_parse() to let clap automatically handle --help
+    let args = CliArgs::parse();
 
     // Setup logging
     let log_level = if args.verbose {
