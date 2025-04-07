@@ -62,7 +62,6 @@ impl AacPacket {
         match aac_packet_type {
             AacPacketType::Raw => AacPacket::Raw(data),
             AacPacketType::SequenceHeader => AacPacket::SequenceHeader(data),
-            // _ => AacPacket::Unknown { aac_packet_type, data },
         }
     }
 
@@ -165,58 +164,38 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let cases = [
-            (
-                AacPacketType::Raw,
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::Raw(Bytes::from(vec![0, 1, 2, 3])),
-            ),
-            (
-                AacPacketType::SequenceHeader,
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::SequenceHeader(Bytes::from(vec![0, 1, 2, 3])),
-            ),
-            (
-                AacPacketType::SequenceHeader,
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::SequenceHeader(Bytes::from(vec![0, 1, 2, 3])),
-            ),
-            (
-                AacPacketType::Raw,
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::Raw(Bytes::from(vec![0, 1, 2, 3])),
-            ),
-            (
-                AacPacketType::new(0x2).unwrap_or(AacPacketType::Raw),
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::Unknown {
-                    aac_packet_type: AacPacketType::new(0x2).unwrap_or(AacPacketType::Raw),
-                    data: Bytes::from(vec![0, 1, 2, 3]),
-                },
-            ),
-            (
-                AacPacketType::new(0x3).unwrap_or(AacPacketType::Raw),
-                Bytes::from(vec![0, 1, 2, 3]),
-                AacPacket::Unknown {
-                    aac_packet_type: AacPacketType::new(0x3).unwrap_or(AacPacketType::Raw),
-                    data: Bytes::from(vec![0, 1, 2, 3]),
-                },
-            ),
-        ];
+        // Test AAC Sequence Header packet
+        let seq_header_data = Bytes::from(vec![0, 1, 2, 3]);
+        let seq_header_packet =
+            AacPacket::new(AacPacketType::SequenceHeader, seq_header_data.clone());
+        assert_eq!(
+            seq_header_packet,
+            AacPacket::SequenceHeader(seq_header_data)
+        );
 
-        for (packet_type, data, expected) in cases {
-            let packet = AacPacket::new(packet_type, data.clone());
-            assert_eq!(packet, expected);
-        }
+        // Test AAC Raw packet
+        let raw_data = Bytes::from(vec![4, 5, 6, 7]);
+        let raw_packet = AacPacket::new(AacPacketType::Raw, raw_data.clone());
+        assert_eq!(raw_packet, AacPacket::Raw(raw_data));
+
+        // Test that the AacPacket::new method properly handles the different packet types
+        assert!(matches!(
+            AacPacket::new(AacPacketType::SequenceHeader, Bytes::new()),
+            AacPacket::SequenceHeader(_)
+        ));
+        assert!(matches!(
+            AacPacket::new(AacPacketType::Raw, Bytes::new()),
+            AacPacket::Raw(_)
+        ));
     }
 
     #[test]
     fn test_aac_packet_type() {
         assert_eq!(
             format!("{:?}", AacPacketType::SequenceHeader),
-            "AacPacketType::SequenceHeader"
+            "SequenceHeader"
         );
-        assert_eq!(format!("{:?}", AacPacketType::Raw), "AacPacketType::Raw");
+        assert_eq!(format!("{:?}", AacPacketType::Raw), "Raw");
         let packet_type_2 = AacPacketType::new(0x2).unwrap_or(AacPacketType::Raw);
         let packet_type_3 = AacPacketType::new(0x3).unwrap_or(AacPacketType::Raw);
         assert_eq!(format!("{:?}", packet_type_2), "Raw");

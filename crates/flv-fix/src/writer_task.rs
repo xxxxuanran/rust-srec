@@ -220,7 +220,7 @@ impl FlvWriterTask {
 
         // Prepare data for blocking task
         let output_path = self.output_dir.join(format!(
-            "{}_part{:03}_{}.{}",
+            "{}_p{:03}_{}.{}",
             self.base_name,
             self.file_counter,
             Local::now().format("%Y%m%d_%H%M%S"),

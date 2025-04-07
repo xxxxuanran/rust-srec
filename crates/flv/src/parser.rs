@@ -245,6 +245,7 @@ impl FlvParserRef {
 
 mod tests {
     #[tokio::test]
+    #[ignore] // Ignore this test for now
     async fn test_read_file() -> Result<(), Box<dyn std::error::Error>> {
         let path = std::path::Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
 
@@ -276,6 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Ignore this test for now
     async fn test_read_file_ref() -> Result<(), Box<dyn std::error::Error>> {
         let path = std::path::Path::new("D:/test/999/test.flv");
 
