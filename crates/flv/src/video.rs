@@ -930,11 +930,11 @@ mod tests {
 
     #[test]
     fn test_legacy_hevc_parsing() {
-        // Test 1: NALU packet (type 1) - should have composition time
+        // Test 1: Network Abstraction Layer Unit packet (type 1) - should have composition time
         let mut reader = io::Cursor::new(Bytes::from_static(&[
-            // HEVC packet type 1 (NALU)
+            // HEVC packet type 1 (Network Abstraction Layer Unit)
             0x01, // Composition time offset (0x001234)
-            0x00, 0x12, 0x34, // Some fake HEVC NALU data
+            0x00, 0x12, 0x34, // Some fake HEVC Network Abstraction Layer Unit data
             0x40, 0x01, 0x0c, 0x01, 0x77,
         ]));
 
@@ -956,7 +956,7 @@ mod tests {
         // Test 2: End of sequence packet (type 2)
         let mut reader = io::Cursor::new(Bytes::from_static(&[
             // HEVC packet type 2 (end of sequence)
-            0x02,
+            0x02, 0x00, 0x00, 0x00, // Need composition time even for end of sequence
         ]));
 
         // Create packet type for legacy HEVC

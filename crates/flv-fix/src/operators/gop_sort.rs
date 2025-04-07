@@ -273,7 +273,7 @@ impl FlvOperator for GopSortOperator {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use flv::header::FlvHeader;
+    use flv::{header::FlvHeader, tag::FlvTagType};
     use kanal::bounded_async;
 
     // Helper functions for testing
