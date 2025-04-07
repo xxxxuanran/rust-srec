@@ -79,10 +79,11 @@ use h265::HEVCDecoderConfigurationRecord;
 use super::av1::Av1Packet;
 use super::hevc::HevcPacket;
 use crate::avc::AvcPacket;
+use crate::resolution::Resolution;
 
 /// Represents the type of video frame in an FLV video tag
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub enum VideoFrameType {
     /// Key frame (for AVC, a seekable frame)
     KeyFrame = 1,
@@ -164,7 +165,7 @@ impl TryFrom<u8> for VideoCommand {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub enum VideoCodecId {
     /// Sorenson H.263
     SorensonH263 = 2,
@@ -585,6 +586,14 @@ impl VideoTagBody {
                     })),
                 }
             }
+        }
+    }
+
+    pub fn get_video_resolution(&self) -> Option<Resolution> {
+        match self {
+            VideoTagBody::Avc(avc_data) => avc_data.get_video_resolution(),
+            VideoTagBody::Hevc(hevc_data) => hevc_data.get_video_resolution(),
+            _ => None,
         }
     }
 }

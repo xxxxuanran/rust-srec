@@ -197,7 +197,7 @@ impl Decoder for FlvDecoder {
                     tag_type_byte
                 );
                 // Discard the single invalid byte and try resyncing
-                src.advance(1);
+                // src.advance(1);
                 // Now attempt resync on the rest
                 if !self.try_resync(src) {
                     // Resync advanced the buffer. Return None to signal progress
@@ -247,7 +247,7 @@ impl Decoder for FlvDecoder {
             match FlvTag::demux(&mut cursor) {
                 // Use the FlvUtil<FlvTag> implementation
                 Ok(tag) => {
-                    debug!(
+                    trace!(
                         "Successfully parsed FLV tag: Type={}, Timestamp={}, Size={}",
                         tag.tag_type, tag.timestamp_ms, data_size
                     );
@@ -702,7 +702,7 @@ mod tests {
     #[ignore]
     async fn test_read_file_async() -> Result<(), Box<dyn std::error::Error>> {
         init_tracing(); // Initialize tracing
-        let path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
+        let path = Path::new("D:/test/999/testHEVC.flv");
 
         if !path.exists() {
             println!(
@@ -823,7 +823,7 @@ mod tests {
     #[ignore] // This test requires a specific file to be present
     async fn test_compare_parsers() -> Result<(), Box<dyn std::error::Error>> {
         init_tracing(); // Initialize tracing
-        let path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
+        let path = Path::new("D:/test/999/test.flv");
 
         // Skip the test if the file doesn't exist
         if !path.exists() {
@@ -850,6 +850,11 @@ mod tests {
             match result {
                 Ok(FlvData::Tag(tag)) => {
                     async_tags_count += 1;
+
+                    println!(
+                        "Async parser: Tag Type: {}, Timestamp: {}, Size: {}",
+                        tag.tag_type, tag.timestamp_ms, tag.data.len()
+                    );
 
                     // Categorize the tag by type
                     let tag_type = if tag.is_video_tag() {

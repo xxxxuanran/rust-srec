@@ -22,11 +22,11 @@ pub trait FlvOperator {
     fn context(&self) -> &Arc<StreamerContext>;
 
     /// Process the FLV stream asynchronously
-    async fn process(
+    fn process(
         &mut self,
         input: AsyncReceiver<Result<FlvData, FlvError>>,
         output: AsyncSender<Result<FlvData, FlvError>>,
-    );
+    ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Get the name of this operator for logging and debugging
     fn name(&self) -> &'static str;

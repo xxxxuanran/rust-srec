@@ -24,17 +24,15 @@
 //! - **ScriptFilter**: Removes or modifies problematic script tags
 
 use crate::context::StreamerContext;
-use crate::operators::limit::{self, LimitConfig};
+use crate::operators::limit::LimitConfig;
 use crate::operators::script_filler::ScriptFillerConfig;
 use crate::operators::{
     ContinuityMode, DefragmentOperator, FlvOperator, GopSortOperator, HeaderCheckOperator,
     LimitOperator, RepairStrategy, ScriptFilterOperator, ScriptKeyframesFillerOperator,
-    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator, defragment,
-    time_consistency,
+    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator,
 };
 use flv::data::FlvData;
 use flv::error::FlvError;
-use futures::FutureExt;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -113,13 +111,14 @@ impl FlvPipeline {
         // Create channels for all operators
         let (defrag_tx, defrag_rx) = kanal::bounded_async(config.channel_buffer_size);
         let (header_check_tx, header_check_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (limit_tx, limit_rx) = kanal::bounded_async(config.channel_buffer_size);
         let (gop_sort_tx, gop_sort_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(config.channel_buffer_size);
         let (timing_repair_tx, timing_repair_rx) = kanal::bounded_async(config.channel_buffer_size);
         let (split_tx, split_rx) = kanal::bounded_async(config.channel_buffer_size);
         let (time_consistency_tx, time_consistency_rx) =
             kanal::bounded_async(config.channel_buffer_size);
+        let (limit_tx, limit_rx) = kanal::bounded_async(config.channel_buffer_size);
+        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(config.channel_buffer_size);
+
         let (time_consistency_2_tx, time_consistency_2_rx) =
             kanal::bounded_async(config.channel_buffer_size);
         let (keyframe_index_tx, keyframe_index_rx) =
@@ -259,9 +258,11 @@ mod test {
     use crate::context::StreamerContext;
     use crate::writer_task::FlvWriterTask;
 
+    use bytes::Bytes;
     use flv::parser_async::FlvDecoderStream;
     use futures::StreamExt;
     use std::path::Path;
+    use tracing::{debug, info};
 
     // Helper to initialize tracing for tests
     fn init_tracing() {
@@ -280,7 +281,7 @@ mod test {
 
         // Skip if test file doesn't exist
         if !input_path.exists() {
-            tracing::info!(path = %input_path.display(), "Test file not found, skipping test");
+            info!(path = %input_path.display(), "Test file not found, skipping test");
             return Ok(());
         }
 
@@ -298,7 +299,7 @@ mod test {
             .to_string();
 
         let start_time = std::time::Instant::now(); // Start timer
-        tracing::info!(path = %input_path.display(), "Starting FLV processing pipeline test");
+        info!(path = %input_path.display(), "Starting FLV processing pipeline test");
 
         // Create the context
         let context = StreamerContext::default();
@@ -325,16 +326,13 @@ mod test {
         writer_task.run(processed_stream).await?; // Propagate writer errors
 
         let elapsed = start_time.elapsed();
-        tracing::info!(duration = ?elapsed, "Processing and writing completed.");
 
         // Get stats from the writer task for assertions
         let total_tags_written = writer_task.total_tags_written();
         let files_created = writer_task.files_created();
 
-        let elapsed = start_time.elapsed();
-        tracing::info!(duration = ?elapsed, "Processing completed");
-
-        tracing::info!(
+        info!(
+            duration = ?elapsed,
             total_tags = total_tags_written,
             files_written = files_created,
             "Pipeline finished processing"
