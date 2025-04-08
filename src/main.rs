@@ -414,7 +414,6 @@ async fn main() {
                 info!("Keyframe index will be injected into metadata for better seeking");
                 Some(ScriptFillerConfig {
                     keyframe_duration_ms: (duration_limit * 1000.0) as u32,
-                    ..Default::default()
                 })
             } else {
                 info!("Keyframe index injection is disabled due to no duration limit set");
