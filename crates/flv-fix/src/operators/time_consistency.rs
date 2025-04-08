@@ -232,7 +232,7 @@ impl FlvOperator for TimeConsistencyOperator {
 
                                     if state.segment_count > 1 && state.needs_offset_calculation {
                                         self.calculate_timestamp_offset(&mut state);
-                                    } else if state.segment_count == 1 {
+                                    } else if state.segment_count == 1 && self.continuity_mode == ContinuityMode::Reset {
                                         // use the first timestamp as the delta
                                         state.timestamp_offset = -((tag.timestamp_ms) as i64);
                                     }
