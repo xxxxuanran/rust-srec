@@ -51,7 +51,7 @@ jobs:
     name: Build
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-22.04-arm, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
             artifact_name: rust-srec
