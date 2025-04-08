@@ -35,14 +35,18 @@ impl<'a> Amf0Decoder<'a> {
     }
 
     /// Read all the encoded values from the decoder.
-    pub fn decode_all(&mut self) -> Result<Vec<Amf0Value<'a>>, Amf0ReadError> {
+    /// Returns both successfully decoded values and any error that occurred.
+    pub fn decode_all(&mut self) -> (Vec<Amf0Value<'a>>, Option<Amf0ReadError>) {
         let mut results = vec![];
 
         while !self.is_empty() {
-            results.push(self.decode()?);
+            match self.decode() {
+                Ok(value) => results.push(value),
+                Err(err) => return (results, Some(err)),
+            }
         }
 
-        Ok(results)
+        (results, None)
     }
 
     /// Read the next encoded value from the decoder.
@@ -300,9 +304,10 @@ mod tests {
         amf0_multi.extend_from_slice(&[0x00, 0x00, 0x09]); // object end (0x00 0x00 0x09)
 
         let mut amf_reader = Amf0Decoder::new(&amf0_multi);
-        let values = amf_reader.decode_all().unwrap();
+        let (values, error) = amf_reader.decode_all();
 
         assert_eq!(values.len(), 4);
+        assert!(error.is_none());
 
         assert_eq!(values[0], Amf0Value::Number(772.161));
         assert_eq!(values[1], Amf0Value::Boolean(true));
@@ -311,6 +316,24 @@ mod tests {
             values[3],
             Amf0Value::Object(vec![("test".into(), Amf0Value::Null)].into())
         );
+    }
+
+    #[test]
+    fn test_decode_all_with_error() {
+        let mut amf0_data = vec![0x00]; // Number marker
+        amf0_data.extend_from_slice(&772.161_f64.to_be_bytes());
+        amf0_data.extend_from_slice(&[0x01, 0x01]); // Boolean true
+        amf0_data.push(0xFF); // Invalid marker
+
+        let mut amf_reader = Amf0Decoder::new(&amf0_data);
+        let (values, error) = amf_reader.decode_all();
+
+        assert_eq!(values.len(), 2);
+        assert!(error.is_some());
+        assert!(matches!(error, Some(Amf0ReadError::UnknownMarker(0xFF))));
+
+        assert_eq!(values[0], Amf0Value::Number(772.161));
+        assert_eq!(values[1], Amf0Value::Boolean(true));
     }
 
     #[test]

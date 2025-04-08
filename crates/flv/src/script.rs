@@ -59,6 +59,7 @@ use std::{fmt, io};
 use amf0::{Amf0Decoder, Amf0Marker, Amf0Value};
 use bytes::Bytes;
 use bytes_util::BytesCursorExt;
+use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScriptData {
@@ -69,6 +70,24 @@ pub struct ScriptData {
 }
 
 impl ScriptData {
+    /// Creates a new empty ScriptData instance with the specified name.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use flv::script::ScriptData;
+    ///
+    /// let script = ScriptData::new("onMetaData");
+    /// assert_eq!(script.name, "onMetaData");
+    /// assert!(script.data.is_empty());
+    /// ```
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data: Vec::new(),
+        }
+    }
+
     pub fn demux(reader: &mut io::Cursor<Bytes>) -> io::Result<Self> {
         let buf = reader.extract_remaining();
         let mut amf0_reader = Amf0Decoder::new(&buf);
@@ -86,9 +105,21 @@ impl ScriptData {
             }
         };
 
-        let data = amf0_reader
-            .decode_all()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let (data, error) = amf0_reader.decode_all();
+
+        // If data is empty and we have an error, return the error
+        if data.is_empty() && error.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse script data: {:?}", error.unwrap()),
+            ));
+        } else if error.is_some() {
+            // If we have data but also an error, log the error but continue
+            warn!(
+                "Partial script data parsed with error: {:?}",
+                error.unwrap()
+            );
+        }
 
         Ok(Self {
             name: name.into_owned(),
