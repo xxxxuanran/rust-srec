@@ -129,186 +129,273 @@ impl ScriptKeyframesFillerOperator {
         }
     }
 
-    /// Modifies the parsed AMF values to include the keyframes property.
-    fn add_keyframes_to_amf(&self, tag: FlvTag) -> io::Result<FlvTag> {
-        // Parse the AMF data using a reference to the tag data instead of cloning
-        let mut cursor = std::io::Cursor::new(tag.data.clone());
+    fn create_script_tag_payload() -> Bytes {
+        // Create a new script tag with empty data
+        let mut buffer = Vec::new();
+        amf0::Amf0Encoder::encode_string(&mut buffer, "onMetaData").unwrap();
+        amf0::Amf0Encoder::encode(
+            &mut buffer,
+            &Amf0Value::Object(Cow::Owned(vec![
+                // add minimal duration property
+                (Cow::Borrowed("duration"), Amf0Value::Number(0.0)),
+            ])),
+        )
+        .unwrap();
+        Bytes::from(buffer)
+    }
 
-        if let Ok(amf_data) = ScriptData::demux(&mut cursor) {
-            if amf_data.name == "onMetaData" && !amf_data.data.is_empty() {
-                // typically the onMetaData is a AMF0 object
-                if let Amf0Value::Object(props) = &amf_data.data[0] {
-                    debug!(
-                        "{} Found onMetaData with {} properties",
-                        self.context.name,
-                        props.len()
-                    );
+    /// Creates a fallback tag with the same metadata as the original but with default script payload
+    fn create_fallback_tag(&self, original_tag: &FlvTag) -> FlvTag {
+        FlvTag {
+            timestamp_ms: original_tag.timestamp_ms,
+            stream_id: original_tag.stream_id,
+            tag_type: original_tag.tag_type,
+            data: Self::create_script_tag_payload(),
+        }
+    }
 
-                    // estimate size of the new object
-                    // Start with the size of the original data
-                    let mut estimated_size = tag.data.len() + 1;
+    /// Processes the AMF data for a valid onMetaData object
+    fn process_onmeta_object(
+        &self,
+        props: &[(Cow<'_, str>, Amf0Value)],
+        tag: &FlvTag,
+        amf_data_name: &str,
+    ) -> io::Result<FlvTag> {
+        debug!(
+            "{} Found onMetaData with {} properties",
+            self.context.name,
+            props.len()
+        );
 
-                    // sum the estimated size of all the natural metadata keys
-                    estimated_size += TOTAL_NATURAL_METADATA_SIZE;
+        // Calculate buffer sizes
+        let keyframes_count = self
+            .config
+            .keyframe_duration_ms
+            .div_ceil(MIN_INTERVAL_BETWEEN_KEYFRAMES_MS);
+        let double_array_size = 2 * keyframes_count as usize;
 
-                    // keyframes count
-                    let keyframes_count = self
-                        .config
-                        .keyframe_duration_ms
-                        .div_ceil(MIN_INTERVAL_BETWEEN_KEYFRAMES_MS);
+        // Pre-allocate with a reasonable size estimate
+        // Base size + metadata + keyframes structure
+        let estimated_size = tag.data.len()
+            + TOTAL_NATURAL_METADATA_SIZE
+            + (1 + (3 * 25) + (3 * 5) + (9 * double_array_size) + 3);
 
-                    // the total size of keyframes arrays (times, filepositions)
-                    let double_array_size = 2 * keyframes_count as usize;
+        debug!("Estimated script data size: {}", estimated_size);
+        let mut buffer = Vec::with_capacity(estimated_size);
 
-                    // Keyframes size calculation:
-                    // 1. Object marker: 1 byte
-                    // 2. Three property names (times, filepositions, spacer): ~20 bytes each including length encoding
-                    // 3. Each array has a marker (1 byte) and length field (4 bytes)
-                    // 4. For spacer array: Each NaN value needs 9 bytes (1 marker + 8 bytes f64), and we have 2*keyframes_count values
-                    // 5. Object end marker: 3 bytes
+        // Write metadata name (e.g. "onMetaData")
+        amf0::Amf0Encoder::encode_string(&mut buffer, amf_data_name).unwrap();
 
-                    let keyframes_size = 1 +                      // Object marker
-                        (3 * 20) +                                // 3 property names est. 20 bytes each
-                        (3 * 5) +                                 // 3 arrays with marker (1) + length field (4)
-                        (9 * double_array_size) +               // Spacer array values (9 bytes each)
-                        3; // Object end marker (3 bytes)
+        // Start object
+        buffer.write_u8(Amf0Marker::Object as u8)?;
 
-                    estimated_size += keyframes_size;
+        // Get all keys except "keyframes" to process first
+        let ordered_keys: Vec<&str> =
+            NATURAL_METADATA_KEY_ORDER[..NATURAL_METADATA_KEY_ORDER.len() - 1].to_vec();
 
-                    debug!("Estimated script data size: {}", estimated_size);
+        // Track if we've added standard flags
+        let flags_added = self.write_metadata_properties(&mut buffer, props, &ordered_keys)?;
 
-                    // Allocate buffer with estimated size
-                    let mut buffer = Vec::with_capacity(estimated_size);
+        // Add non-standard properties
+        self.write_custom_properties(&mut buffer, props)?;
 
-                    // Create a mutable list of keys to track which ones we've processed
-                    // Skip "keyframes" as we'll handle it specially
-                    let ordered_keys: Vec<&str> =
-                        NATURAL_METADATA_KEY_ORDER[..NATURAL_METADATA_KEY_ORDER.len() - 1].to_vec();
+        // Add compatibility flags if missing
+        self.write_compatibility_flags(&mut buffer, flags_added)?;
 
-                    // Add onMetaData string
-                    amf0::Amf0Encoder::encode_string(&mut buffer, &amf_data.name).unwrap();
+        // Add keyframes structure
+        self.write_keyframes_section(&mut buffer, double_array_size)?;
 
-                    // Start object
-                    buffer.write_u8(Amf0Marker::Object as u8)?; // AMF0 object marker
+        // End of object
+        amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
 
-                    // Track if we've added the standard flags
-                    let mut has_keyframes_added = false;
-                    let mut can_seek_to_end_added = false;
+        debug!("New script data payload size: {}", buffer.len());
 
-                    // loop through the ordered keys
-                    for key in ordered_keys {
-                        // Check for special flags
-                        if key == "hasKeyframes" {
-                            has_keyframes_added = true;
-                        } else if key == "canSeekToEnd" {
-                            can_seek_to_end_added = true;
-                        } else if key == "keyframes" {
-                            // Skip keyframes as we'll handle it specially
-                            continue;
-                        }
+        // Create a new tag with the modified data
+        Ok(FlvTag {
+            timestamp_ms: tag.timestamp_ms,
+            stream_id: tag.stream_id,
+            tag_type: tag.tag_type,
+            data: Bytes::from(buffer),
+        })
+    }
 
-                        // Find the property in the original props
-                        let value_opt = props
-                            .iter()
-                            .find(|(k, _)| k.as_ref() == key)
-                            .map(|(_, v)| v);
+    /// Write standard metadata properties in the correct order
+    fn write_metadata_properties(
+        &self,
+        buffer: &mut Vec<u8>,
+        props: &[(Cow<'_, str>, Amf0Value)],
+        ordered_keys: &[&str],
+    ) -> io::Result<(bool, bool)> {
+        let mut has_keyframes_added = false;
+        let mut can_seek_to_end_added = false;
 
-                        if let Some(value) = value_opt {
-                            // write key
-                            write_amf_property_key!(&mut buffer, key);
-                            // Encode value
-                            amf0::Amf0Encoder::encode(&mut buffer, value).unwrap();
-                            trace!("Encoded property: {}, {:?}", key, value);
-                        } else {
-                            // Add default values for missing properties
-                            if let Some(default_value) = self.get_default_metadata_value(key) {
-                                trace!(
-                                    "{} Adding default value for missing property: {}",
-                                    self.context.name, key
-                                );
-                                write_amf_property_key!(&mut buffer, key);
-                                amf0::Amf0Encoder::encode(&mut buffer, &default_value).unwrap();
-                            } else {
-                                // Skip unknown properties
-                                trace!(
-                                    "{} Unknown property in metadata: {}",
-                                    self.context.name, key
-                                );
-                            }
-                        }
-                    }
+        for key in ordered_keys {
+            // Check for special flags
+            if *key == "hasKeyframes" {
+                has_keyframes_added = true;
+            } else if *key == "canSeekToEnd" {
+                can_seek_to_end_added = true;
+            } else if *key == "keyframes" {
+                // Skip keyframes as we'll handle it specially
+                continue;
+            }
 
-                    // Add remaining properties from the original object
-                    for (key, value) in props.iter() {
-                        if !NATURAL_METADATA_KEY_ORDER.contains(&key.as_ref()) {
-                            write_amf_property_key!(&mut buffer, key);
-                            amf0::Amf0Encoder::encode(&mut buffer, value).unwrap();
-                        }
-                    }
+            // Find property in the original props
+            let value_opt = props
+                .iter()
+                .find(|(k, _)| k.as_ref() == *key)
+                .map(|(_, v)| v);
 
-                    // Add standard player compatibility flags if not present
-                    if !has_keyframes_added {
-                        write_amf_property_key!(&mut buffer, "hasKeyframes");
-                        amf0::Amf0Encoder::encode(&mut buffer, &Amf0Value::Boolean(true)).unwrap();
-                    }
-
-                    if !can_seek_to_end_added {
-                        write_amf_property_key!(&mut buffer, "canSeekToEnd");
-                        amf0::Amf0Encoder::encode(&mut buffer, &Amf0Value::Boolean(true)).unwrap();
-                    }
-
-                    // Add keyframes object directly
-                    write_amf_property_key!(&mut buffer, "keyframes");
-                    buffer.write_u8(Amf0Marker::Object as u8)?; // AMF0 Object marker
-
-                    // Times array
-                    write_amf_property_key!(&mut buffer, "times");
-                    buffer.write_u8(Amf0Marker::StrictArray as u8)?; // AMF0 Strict Array marker
-                    buffer.write_u32::<BigEndian>(0)?;
-
-                    // File positions array - empty array
-                    write_amf_property_key!(&mut buffer, "filepositions");
-                    buffer.push(Amf0Marker::StrictArray as u8); // AMF0 Strict Array marker
-                    buffer.write_u32::<BigEndian>(0)?;
-
-                    // Spacer array, stub array
-                    write_amf_property_key!(&mut buffer, "spacer");
-                    buffer.write_u8(Amf0Marker::StrictArray as u8)?; // AMF0 Strict Array marker
-
-                    // // Add spacer array length
-                    buffer.write_u32::<BigEndian>(double_array_size as u32)?;
-
-                    for _ in 0..double_array_size {
-                        amf0::Amf0Encoder::encode_number(&mut buffer, f64::NAN).unwrap();
-                    }
-
-                    // // End keyframes object
-                    amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
-
-                    // End of object
-                    amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
-
-                    debug!("New script data payload size: {}", buffer.len());
-
-                    buffer.flush()?; // Flush the buffer to ensure all data is written
-
-                    // Create a new tag with the modified data
-                    return Ok(FlvTag {
-                        timestamp_ms: tag.timestamp_ms,
-                        stream_id: tag.stream_id,
-                        tag_type: tag.tag_type,
-                        data: Bytes::from(buffer),
-                    });
-                } else {
-                    // for other types, we just ignore the injection
-                    warn!(
-                        "{} Unsupported AMF data type for keyframe injection: {:?}",
-                        self.context.name, amf_data.data[0]
-                    );
-                }
+            if let Some(value) = value_opt {
+                // Write existing property
+                write_amf_property_key!(buffer, key);
+                amf0::Amf0Encoder::encode(buffer, value).unwrap();
+                trace!("Encoded property: {}, {:?}", key, value);
+            } else if let Some(default_value) = self.get_default_metadata_value(key) {
+                // Add default value for missing property
+                trace!(
+                    "{} Adding default value for missing property: {}",
+                    self.context.name, key
+                );
+                write_amf_property_key!(buffer, key);
+                amf0::Amf0Encoder::encode(buffer, &default_value).unwrap();
             }
         }
-        Ok(tag)
+
+        Ok((has_keyframes_added, can_seek_to_end_added))
+    }
+
+    /// Write custom properties not in the standard ordered list
+    fn write_custom_properties(
+        &self,
+        buffer: &mut Vec<u8>,
+        props: &[(Cow<'_, str>, Amf0Value)],
+    ) -> io::Result<()> {
+        // Add any remaining custom properties from the original object
+        for (key, value) in props.iter() {
+            if !NATURAL_METADATA_KEY_ORDER.contains(&key.as_ref()) {
+                write_amf_property_key!(buffer, key);
+                amf0::Amf0Encoder::encode(buffer, value).unwrap();
+            }
+        }
+        Ok(())
+    }
+
+    /// Write standard compatibility flags if they weren't already present
+    fn write_compatibility_flags(
+        &self,
+        buffer: &mut Vec<u8>,
+        (has_keyframes_added, can_seek_to_end_added): (bool, bool),
+    ) -> io::Result<()> {
+        // Add standard player compatibility flags if not present
+        if !has_keyframes_added {
+            write_amf_property_key!(buffer, "hasKeyframes");
+            amf0::Amf0Encoder::encode(buffer, &Amf0Value::Boolean(true)).unwrap();
+        }
+
+        if !can_seek_to_end_added {
+            write_amf_property_key!(buffer, "canSeekToEnd");
+            amf0::Amf0Encoder::encode(buffer, &Amf0Value::Boolean(true)).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Write the keyframes section with times, filepositions and spacer arrays
+    fn write_keyframes_section(
+        &self,
+        buffer: &mut Vec<u8>,
+        double_array_size: usize,
+    ) -> io::Result<()> {
+        // Add keyframes object directly
+        write_amf_property_key!(buffer, "keyframes");
+        buffer.write_u8(Amf0Marker::Object as u8)?;
+
+        // Times array - empty array
+        write_amf_property_key!(buffer, "times");
+        buffer.write_u8(Amf0Marker::StrictArray as u8)?;
+        buffer.write_u32::<BigEndian>(0)?;
+
+        // File positions array - empty array
+        write_amf_property_key!(buffer, "filepositions");
+        buffer.push(Amf0Marker::StrictArray as u8);
+        buffer.write_u32::<BigEndian>(0)?;
+
+        // Spacer array with pre-allocated NaN values
+        write_amf_property_key!(buffer, "spacer");
+        buffer.write_u8(Amf0Marker::StrictArray as u8)?;
+        buffer.write_u32::<BigEndian>(double_array_size as u32)?;
+
+        for _ in 0..double_array_size {
+            amf0::Amf0Encoder::encode_number(buffer, f64::NAN).unwrap();
+        }
+
+        // End keyframes object
+        amf0::Amf0Encoder::object_eof(buffer).unwrap();
+
+        Ok(())
+    }
+
+    /// Modifies the parsed AMF values to include the keyframes property.
+    fn add_keyframes_to_amf(&self, tag: FlvTag) -> io::Result<FlvTag> {
+        // Parse the AMF data using a reference to the tag data
+        let mut cursor = std::io::Cursor::new(tag.data.clone());
+
+        // Try to parse the AMF data
+        match ScriptData::demux(&mut cursor) {
+            Ok(amf_data) => {
+                debug!(
+                    "{} Script tag name: '{}', data length: {}, timestamp: {}ms",
+                    self.context.name,
+                    amf_data.name,
+                    tag.data.len(),
+                    tag.timestamp_ms
+                );
+
+                // Verify we have "onMetaData" with non-empty data array
+                if amf_data.name != "onMetaData" {
+                    warn!(
+                        "{} Script tag name is not 'onMetaData', found: '{}'. Creating fallback.",
+                        self.context.name, amf_data.name
+                    );
+                    return self.add_keyframes_to_amf(self.create_fallback_tag(&tag));
+                }
+
+                if amf_data.data.is_empty() {
+                    warn!(
+                        "{} onMetaData script tag has empty data array. Creating fallback.",
+                        self.context.name
+                    );
+                    return self.add_keyframes_to_amf(self.create_fallback_tag(&tag));
+                }
+
+                // Check if first data item is an Object
+                if let Amf0Value::Object(props) = &amf_data.data[0] {
+                    self.process_onmeta_object(props, &tag, &amf_data.name)
+                } else {
+                    warn!(
+                        "{} Unsupported AMF data type for keyframe injection: {:?}. Expected Object but found different type.",
+                        self.context.name, amf_data.data[0]
+                    );
+                    self.add_keyframes_to_amf(self.create_fallback_tag(&tag))
+                }
+            }
+            Err(err) => {
+                // Log parsing error details
+                warn!(
+                    "{} Failed to parse AMF data for keyframe injection: {}. \
+                    Tag data length: {}, timestamp: {}ms, first few bytes: {:?}",
+                    self.context.name,
+                    err,
+                    tag.data.len(),
+                    tag.timestamp_ms,
+                    tag.data.iter().take(16).collect::<Vec<_>>()
+                );
+
+                // Use fallback
+                self.add_keyframes_to_amf(self.create_fallback_tag(&tag))
+            }
+        }
     }
 
     /// Get default metadata value for a given key.

@@ -256,7 +256,7 @@ mod test {
     // Helper to initialize tracing for tests
     fn init_tracing() {
         let _ = tracing_subscriber::fmt::fmt()
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(tracing::Level::DEBUG)
             .with_test_writer() // Write to test output
             .try_init();
     }
@@ -267,7 +267,7 @@ mod test {
         init_tracing(); // Initialize tracing for logging
 
         // Source and destination paths
-        let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
+        let input_path = Path::new("D:/test/999/testHEVC.flv");
 
         // Skip if test file doesn't exist
         if !input_path.exists() {
