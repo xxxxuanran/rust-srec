@@ -64,15 +64,14 @@ struct CliArgs {
     )]
     max_duration: String,
 
-    /// Filter duplicate tags
-    #[arg(
-        short,
-        long,
-        default_value = "true",
-        help = "Remove duplicate video/audio frames"
-    )]
-    filter_duplicates: bool,
-
+    // /// Filter duplicate tags
+    // #[arg(
+    //     short,
+    //     long,
+    //     default_value = "true",
+    //     help = "Remove duplicate video/audio frames"
+    // )]
+    // filter_duplicates: bool,
     /// Enable verbose logging
     #[arg(short, long, help = "Enable detailed debug logging")]
     verbose: bool,
@@ -404,13 +403,23 @@ async fn main() {
 
     // Configure pipeline
     let config = PipelineConfig {
-        duplicate_tag_filtering: args.filter_duplicates,
+        // duplicate_tag_filtering: args.filter_duplicates,
+        duplicate_tag_filtering: false,
         file_size_limit,
         duration_limit,
         repair_strategy: RepairStrategy::Strict, // Fixed to Strict
         continuity_mode: flv_fix::operators::ContinuityMode::Reset, // Fixed to Reset
         keyframe_index_config: if args.keyframe_index {
-            Some(ScriptFillerConfig::default())
+            if duration_limit > 0.0 {
+                info!("Keyframe index will be injected into metadata for better seeking");
+                Some(ScriptFillerConfig {
+                    keyframe_duration_ms: (duration_limit * 1000.0) as u32,
+                    ..Default::default()
+                })
+            } else {
+                info!("Keyframe index injection is disabled due to no duration limit set");
+                Some(ScriptFillerConfig::default())
+            }
         } else {
             None
         },
