@@ -91,7 +91,8 @@ impl Decoder for FlvDecoder {
 
         // --- 1. Parse Header (if needed) ---
         if !self.header_parsed {
-            if src.len() < FLV_HEADER_SIZE {
+            let expected_size = FLV_HEADER_SIZE + PREV_TAG_SIZE_FIELD_SIZE;
+            if src.len() < expected_size {
                 trace!("Awaiting FLV header ({} bytes needed)", FLV_HEADER_SIZE);
                 src.reserve(FLV_HEADER_SIZE - src.len());
                 return Ok(None);
@@ -103,6 +104,8 @@ impl Decoder for FlvDecoder {
             match FlvHeader::parse(&mut cursor) {
                 Ok(header) => {
                     debug!("Successfully parsed FLV header: {:?}", header);
+                    // Skip PrevTagSize field (4 bytes) after header
+                    src.advance(PREV_TAG_SIZE_FIELD_SIZE);
                     self.header_parsed = true;
                     self.expecting_tag_header = true; // After header, expect first tag
                     self.last_tag_size = 0; // Header is preceded by 0 size
