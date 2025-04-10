@@ -1,349 +1,20 @@
-use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::{path::PathBuf, time::Duration};
 
 use clap::Parser;
-use flv::data::FlvData;
-use flv::parser_async::FlvDecoderStream;
-use flv_fix::context::StreamerContext;
 use flv_fix::operators::RepairStrategy;
 use flv_fix::operators::script_filler::ScriptFillerConfig;
-use flv_fix::pipeline::{BoxStream, FlvPipeline, PipelineConfig};
-use flv_fix::writer_task::FlvWriterTask;
-use futures::StreamExt;
-use tokio::fs::File;
-use tokio::io::BufReader;
+use flv_fix::pipeline::PipelineConfig;
+use siphon::{DownloaderConfig, ProxyAuth, ProxyConfig, ProxyType};
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
-// Define CLI arguments
-#[derive(Parser)]
-#[command(
-    author = "hua0512 <https://github.com/hua0512>",
-    version,
-    about = "FLV processing and repair tool",
-    long_about = "A tool for processing, repairing and optimizing FLV (Flash Video) files.\n\
-                  Part of the stream-rec project: https://github.com/hua0512/rust-rec\n\
-                  \n\
-                  This tool fixes common issues in FLV streams such as timestamp anomalies,\n\
-                  out-of-order frames, duration problems, and metadata inconsistencies.\n\
-                  It supports processing individual files or entire directories of FLV files."
-)]
-struct CliArgs {
-    /// Input FLV file(s) or directory to process
-    #[arg(
-        required = true,
-        help = "Path to FLV file(s) or directory containing FLV files"
-    )]
-    input: Vec<PathBuf>,
+mod cli;
+mod processor;
+mod utils;
 
-    /// Output directory for processed files
-    #[arg(
-        short,
-        long,
-        help = "Directory where processed files will be saved (default: ./fix)"
-    )]
-    output_dir: Option<PathBuf>,
-
-    /// Maximum file size with optional unit (B, KB, MB, GB, TB)
-    /// Examples: "4GB", "500MB", "2048KB"
-    #[arg(
-        short,
-        long,
-        default_value = "0",
-        help = "Maximum size for output files with optional unit (B, KB, MB, GB, TB). Examples: \"4GB\", \"500MB\". Use 0 for unlimited."
-    )]
-    max_size: String,
-
-    /// Maximum duration with optional unit (s, m, h)
-    /// Examples: "30m", "1.5h", "90s"
-    #[arg(
-        short = 'd',
-        long,
-        default_value = "0",
-        help = "Maximum duration for output files with optional unit (s, m, h). Examples: \"30m\", \"1.5h\", \"90s\". Use 0 for unlimited."
-    )]
-    max_duration: String,
-
-    /// Enable verbose logging
-    #[arg(short, long, help = "Enable detailed debug logging")]
-    verbose: bool,
-
-    /// Enable keyframe index injection
-    #[arg(
-        short = 'k',
-        long,
-        default_value = "true",
-        help = "Inject keyframe index in metadata for better seeking"
-    )]
-    keyframe_index: bool,
-
-    /// Buffer size for processing channels
-    #[arg(
-        short = 'b',
-        long,
-        default_value = "16",
-        help = "Buffer size for internal processing channels"
-    )]
-    buffer_size: usize,
-}
-
-// Error types for parsing
-#[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
-enum ParseError {
-    InvalidFormat,
-    InvalidNumber,
-    InvalidUnit,
-}
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseError::InvalidFormat => write!(f, "Invalid format"),
-            ParseError::InvalidNumber => write!(f, "Invalid number"),
-            ParseError::InvalidUnit => write!(f, "Invalid unit"),
-        }
-    }
-}
-
-impl std::error::Error for ParseError {}
-
-// Function to parse size with units
-fn parse_size(size_str: &str) -> Result<u64, ParseError> {
-    // Trim whitespace and handle case-insensitivity
-    let size_str = size_str.trim().to_lowercase();
-
-    // Handle empty string
-    if size_str.is_empty() {
-        return Err(ParseError::InvalidFormat);
-    }
-
-    // Split the numeric part and the unit
-    let mut numeric_part = String::new();
-    let mut unit_part = String::new();
-
-    for c in size_str.chars() {
-        if c.is_ascii_digit() || c == '.' {
-            numeric_part.push(c);
-        } else {
-            unit_part.push(c);
-        }
-    }
-
-    // Handle cases with no unit (assume bytes)
-    if unit_part.is_empty() {
-        let bytes = numeric_part
-            .parse::<u64>()
-            .map_err(|_| ParseError::InvalidNumber)?;
-        return Ok(bytes);
-    }
-
-    // Parse the numeric part
-    let value = numeric_part
-        .parse::<f64>()
-        .map_err(|_| ParseError::InvalidNumber)?;
-
-    // Parse the unit and convert to bytes
-    match unit_part.trim() {
-        "b" => Ok(value as u64),
-        "kb" => Ok((value * 1024.0) as u64),
-        "mb" => Ok((value * 1024.0 * 1024.0) as u64),
-        "gb" => Ok((value * 1024.0 * 1024.0 * 1024.0) as u64),
-        "tb" => Ok((value * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64),
-        _ => Err(ParseError::InvalidUnit),
-    }
-}
-
-// Function to parse time with units
-fn parse_time(time_str: &str) -> Result<f32, ParseError> {
-    // Trim whitespace and handle case-insensitivity
-    let time_str = time_str.trim().to_lowercase();
-
-    // Handle empty string
-    if time_str.is_empty() {
-        return Err(ParseError::InvalidFormat);
-    }
-
-    // Try to parse as a simple number (seconds)
-    if let Ok(seconds) = time_str.parse::<f32>() {
-        return Ok(seconds);
-    }
-
-    // Split the numeric part and the unit
-    let mut numeric_part = String::new();
-    let mut unit_part = String::new();
-
-    for c in time_str.chars() {
-        if c.is_ascii_digit() || c == '.' {
-            numeric_part.push(c);
-        } else {
-            unit_part.push(c);
-        }
-    }
-
-    // Parse the numeric part
-    let value = numeric_part
-        .parse::<f32>()
-        .map_err(|_| ParseError::InvalidNumber)?;
-
-    // Parse the unit and convert to seconds
-    match unit_part.trim() {
-        "s" => Ok(value),
-        "m" => Ok(value * 60.0),
-        "h" => Ok(value * 3600.0),
-        _ => Err(ParseError::InvalidUnit),
-    }
-}
-
-// Convert bytes to a human-readable format
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-// Convert seconds to a human-readable format
-fn format_duration(seconds: f32) -> String {
-    if seconds >= 3600.0 {
-        let hours = seconds / 3600.0;
-        format!("{:.2}h", hours)
-    } else if seconds >= 60.0 {
-        let minutes = seconds / 60.0;
-        format!("{:.2}m", minutes)
-    } else {
-        format!("{:.2}s", seconds)
-    }
-}
-
-// Process a single FLV file
-async fn process_file(
-    input_path: &Path,
-    output_dir: &Path,
-    config: PipelineConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let start_time = std::time::Instant::now();
-
-    // Create output directory if it doesn't exist
-    tokio::fs::create_dir_all(output_dir).await?;
-
-    // Create base name for output files
-    let base_name = input_path
-        .file_stem()
-        .ok_or("Invalid filename")?
-        .to_string_lossy()
-        .to_string();
-
-    info!(
-        path = %input_path.display(),
-        "Starting to process file"
-    );
-
-    // Create streamer context and pipeline
-    let context = StreamerContext::default();
-    let pipeline = FlvPipeline::with_config(context, config);
-
-    // Open the file and create decoder stream
-    let file = File::open(input_path).await?;
-    let file_reader = BufReader::new(file);
-    let file_size = file_reader.get_ref().metadata().await?.len();
-    let decoder_stream = FlvDecoderStream::with_capacity(
-        file_reader,
-        32 * 1024, // Input buffer capacity
-    );
-
-    // Create the input stream for the pipeline
-    let input_stream: BoxStream<FlvData> = decoder_stream.boxed();
-
-    // Process the stream through the pipeline
-    let processed_stream = pipeline.process(input_stream);
-
-    // Create writer task and run it
-    let mut writer_task = FlvWriterTask::new(output_dir.to_path_buf(), base_name).await?;
-    writer_task.run(processed_stream).await?;
-
-    let elapsed = start_time.elapsed();
-    let total_tags_written = writer_task.total_tags_written();
-    let files_created = writer_task.files_created();
-
-    info!(
-        path = %input_path.display(),
-        input_size = %format_bytes(file_size),
-        duration = ?elapsed,
-        tags_processed = total_tags_written,
-        files_created = files_created,
-        "Processing complete"
-    );
-
-    Ok(())
-}
-
-// Find FLV files in directory
-async fn find_flv_files(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-    let mut files = Vec::new();
-    let mut entries = tokio::fs::read_dir(dir).await?;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "flv") {
-            files.push(path);
-        }
-    }
-
-    Ok(files)
-}
-
-// Process multiple input paths (files or directories)
-async fn process_inputs(
-    inputs: &[PathBuf],
-    output_dir: &Path,
-    config: PipelineConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut files_to_process = Vec::new();
-
-    // Collect all FLV files to process
-    for input_path in inputs {
-        if input_path.is_file() && input_path.extension().is_some_and(|ext| ext == "flv") {
-            files_to_process.push(input_path.clone());
-        } else if input_path.is_dir() {
-            let flv_files = find_flv_files(input_path).await?;
-            files_to_process.extend(flv_files);
-        } else {
-            error!(
-                "Input {} is not a valid FLV file or directory",
-                input_path.display()
-            );
-        }
-    }
-
-    // Process each file
-    if files_to_process.is_empty() {
-        error!("No FLV files found in the specified input paths");
-        return Err("No FLV files found".into());
-    }
-
-    info!("Found {} FLV files to process", files_to_process.len());
-    for file in files_to_process {
-        if let Err(e) = process_file(&file, output_dir, config.clone()).await {
-            error!(
-                file = %file.display(),
-                error = ?e,
-                "Failed to process file"
-            );
-        }
-    }
-
-    Ok(())
-}
+use cli::CliArgs;
+use utils::{format_bytes, format_duration, parse_size, parse_time};
 
 #[tokio::main]
 async fn main() {
@@ -393,6 +64,12 @@ async fn main() {
         info!("No duration limit set");
     }
 
+    // Log HTTP timeout settings
+    info!(
+        "HTTP timeout configuration: overall={}s, connect={}s, read={}s, write={}s",
+        args.timeout, args.connect_timeout, args.read_timeout, args.write_timeout
+    );
+
     // Configure pipeline
     let config = PipelineConfig {
         duplicate_tag_filtering: false,
@@ -407,7 +84,7 @@ async fn main() {
                     keyframe_duration_ms: (duration_limit * 1000.0) as u32,
                 })
             } else {
-                info!("Keyframe index injection is disabled due to no duration limit set");
+                info!("Keyframe index enabled with default configuration");
                 Some(ScriptFillerConfig::default())
             }
         } else {
@@ -419,8 +96,94 @@ async fn main() {
     // Determine output directory
     let output_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("./fix"));
 
+    // Handle proxy configuration
+    let (proxy_config, _use_system_proxy) = if args.no_proxy {
+        // No proxy flag overrides everything else
+        info!("All proxy settings disabled (--no-proxy flag)");
+        (None, false)
+    } else if let Some(proxy_url) = args.proxy.as_ref() {
+        // Explicit proxy configuration
+        // Parse proxy type
+        let proxy_type = match args.proxy_type.as_str() {
+            "http" => ProxyType::Http,
+            "https" => ProxyType::Https,
+            "socks5" => ProxyType::Socks5,
+            "all" => {
+                error!(
+                    "Invalid proxy type: '{}'. Using 'http' as default.",
+                    args.proxy_type
+                );
+                ProxyType::Http
+            }
+            _ => {
+                error!(
+                    "Invalid proxy type: '{}'. Using 'http' as default.",
+                    args.proxy_type
+                );
+                ProxyType::Http
+            }
+        };
+
+        // Configure proxy authentication if both username and password are provided
+        let auth = if let (Some(username), Some(password)) = (&args.proxy_user, &args.proxy_pass) {
+            Some(ProxyAuth {
+                username: username.clone(),
+                password: password.clone(),
+            })
+        } else {
+            None
+        };
+
+        info!(
+            proxy_url = %proxy_url,
+            proxy_type = ?proxy_type,
+            has_auth = auth.is_some(),
+            "Using explicit proxy configuration for downloads"
+        );
+
+        // Create the proxy configuration
+        let proxy = ProxyConfig {
+            url: proxy_url.clone(),
+            proxy_type,
+            auth,
+        };
+
+        (Some(proxy), false) // Don't use system proxy when explicit proxy is configured
+    } else if args.use_system_proxy {
+        // Use system proxy settings
+        info!("Using system proxy settings for downloads");
+        (None, true)
+    } else {
+        // No proxy settings at all
+        info!("No proxy settings configured for downloads");
+        (None, false)
+    };
+
+    // Create download configuration
+    let download_config = DownloaderConfig::with_config(DownloaderConfig {
+        buffer_size: args.download_buffer,
+        timeout: Duration::from_secs(args.timeout),
+        connect_timeout: Duration::from_secs(args.connect_timeout),
+        read_timeout: Duration::from_secs(args.read_timeout),
+        write_timeout: Duration::from_secs(args.write_timeout),
+        follow_redirects: true,
+        headers: crate::utils::parse_headers(&args.headers),
+        proxy: proxy_config,
+        use_system_proxy: args.use_system_proxy,
+        ..DownloaderConfig::default()
+    });
+
     // Process input files
-    match process_inputs(&args.input, &output_dir, config).await {
+    match processor::process_inputs(
+        &args.input,
+        &output_dir,
+        config,
+        download_config,
+        args.enable_fix,
+        args.output_name_template.as_deref(),
+    )
+    .await
+    {
         Ok(_) => {
             info!("All processing completed");
         }

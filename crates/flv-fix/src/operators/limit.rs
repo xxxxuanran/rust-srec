@@ -319,7 +319,7 @@ impl FlvOperator for LimitOperator {
 
                             // Inside the process method where split decisions are made
                             if should_split
-                                && (!self.config.split_at_keyframes_only || tag.is_key_frame())
+                                && (!self.config.split_at_keyframes_only || tag.is_key_frame_nalu())
                             {
                                 // Direct splitting - no retrospective logic
                                 let split_reason = self.determine_split_reason();
