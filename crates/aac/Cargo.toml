@@ -9,3 +9,6 @@ byteorder = "1.5"
 num-traits = "0.2"
 num-derive = "0.4"
 bytes-util = { path = "../bytes-util" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
