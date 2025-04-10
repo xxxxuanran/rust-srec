@@ -177,7 +177,7 @@ impl LimitOperator {
         // Check size limit if configured
         if let Some(max_size) = self.config.max_size_bytes {
             if self.state.accumulated_size >= max_size {
-                println!(
+                debug!(
                     "{} Size limit exceeded: {} bytes (max: {} bytes)",
                     self.context.name, self.state.accumulated_size, max_size
                 );
@@ -189,7 +189,7 @@ impl LimitOperator {
         if let Some(max_duration) = self.config.max_duration_ms {
             let current_duration = self.state.current_duration();
             if current_duration >= max_duration {
-                println!(
+                debug!(
                     "{} Duration limit exceeded: {} ms (max: {} ms)",
                     self.context.name, current_duration, max_duration
                 );
@@ -661,7 +661,7 @@ mod tests {
             max_duration_ms: Some(300),
             split_at_keyframes_only: true,
             on_split: Some(Box::new(move |reason, _, duration| {
-                println!("Split reason: {:?}, duration: {}ms", reason, duration);
+                debug!("Split reason: {:?}, duration: {}ms", reason, duration);
                 split_timestamps_clone.lock().unwrap().push(duration);
             })),
             use_retrospective_splitting: false, // Explicitly disable
