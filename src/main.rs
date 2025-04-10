@@ -64,14 +64,6 @@ struct CliArgs {
     )]
     max_duration: String,
 
-    // /// Filter duplicate tags
-    // #[arg(
-    //     short,
-    //     long,
-    //     default_value = "true",
-    //     help = "Remove duplicate video/audio frames"
-    // )]
-    // filter_duplicates: bool,
     /// Enable verbose logging
     #[arg(short, long, help = "Enable detailed debug logging")]
     verbose: bool,
@@ -403,7 +395,6 @@ async fn main() {
 
     // Configure pipeline
     let config = PipelineConfig {
-        // duplicate_tag_filtering: args.filter_duplicates,
         duplicate_tag_filtering: false,
         file_size_limit,
         duration_limit,
