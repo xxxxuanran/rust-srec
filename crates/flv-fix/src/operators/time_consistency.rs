@@ -200,27 +200,28 @@ impl FlvOperator for TimeConsistencyOperator {
                                 continue;
                             }
 
-                            // For sequence headers, always set timestamp to 0
-                            if tag.is_video_sequence_header() || tag.is_audio_sequence_header() {
-                                // Save original timestamp for debugging
-                                let original = tag.timestamp_ms;
-                                if original != 0 {
-                                    debug!(
-                                        "{} Reset sequence header timestamp from {}ms to 0ms",
-                                        self.context.name, original
-                                    );
-                                    // Set timestamp to 0
-                                    tag.timestamp_ms = 0;
-                                }
-
-                                if output.send(Ok(data)).await.is_err() {
-                                    return;
-                                }
-                                continue;
-                            }
-
                             // For normal media tags, handle timestamp adjustment
                             if state.new_segment {
+                                // For sequence headers, always set timestamp to 0
+                                if tag.is_video_sequence_header() || tag.is_audio_sequence_header()
+                                {
+                                    // Save original timestamp for debugging
+                                    let original = tag.timestamp_ms;
+                                    if original != 0 {
+                                        debug!(
+                                            "{} Reset sequence header timestamp from {}ms to 0ms",
+                                            self.context.name, original
+                                        );
+                                        // Set timestamp to 0
+                                        tag.timestamp_ms = 0;
+                                    }
+
+                                    if output.send(Ok(data)).await.is_err() {
+                                        return;
+                                    }
+                                    continue;
+                                }
+
                                 if state.first_timestamp_in_segment.is_none() {
                                     // Record the first timestamp in this segment
                                     state.first_timestamp_in_segment = Some(tag.timestamp_ms);
