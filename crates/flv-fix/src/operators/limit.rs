@@ -84,7 +84,7 @@ impl Default for LimitConfig {
             max_size_bytes: None,
             max_duration_ms: None,
             split_at_keyframes_only: true,
-            use_retrospective_splitting: false, // Changed to false to disable by default
+            use_retrospective_splitting: false,
             on_split: None,
         }
     }
@@ -101,6 +101,7 @@ struct StreamState {
     max_timestamp: u32,
     last_keyframe_position: Option<(u64, u32)>, // (size, timestamp) at last keyframe
     split_count: u32,
+    first_content_tag_seen: bool,
 }
 
 impl StreamState {
@@ -115,6 +116,7 @@ impl StreamState {
             max_timestamp: 0,
             last_keyframe_position: None,
             split_count: 0,
+            first_content_tag_seen: false,
         }
     }
 
@@ -185,15 +187,17 @@ impl LimitOperator {
             }
         }
 
-        // Check duration limit if configured
+        // Check duration limit if configured - only if we've seen at least one content tag
         if let Some(max_duration) = self.config.max_duration_ms {
-            let current_duration = self.state.current_duration();
-            if current_duration >= max_duration {
-                debug!(
-                    "{} Duration limit exceeded: {} ms (max: {} ms)",
-                    self.context.name, current_duration, max_duration
-                );
-                return true;
+            if self.state.first_content_tag_seen {
+                let current_duration = self.state.current_duration();
+                if current_duration >= max_duration {
+                    debug!(
+                        "{} Duration limit exceeded: {} ms (max: {} ms)",
+                        self.context.name, current_duration, max_duration
+                    );
+                    return true;
+                }
             }
         }
 
@@ -306,10 +310,19 @@ impl FlvOperator for LimitOperator {
                                     "{} Audio sequence header detected, resetting timestamp.",
                                     self.context.name
                                 );
+                            } else if !self.state.first_content_tag_seen {
+                                // This is the first actual content tag (not sequence header or metadata)
+                                // Set the start timestamp to this tag's timestamp
+                                self.state.start_timestamp = tag.timestamp_ms;
+                                self.state.first_content_tag_seen = true;
+                                debug!(
+                                    "{} First content tag detected, setting start timestamp to {}ms.",
+                                    self.context.name, tag.timestamp_ms
+                                );
                             }
 
                             // Track keyframes for optimal split points
-                            if tag.is_key_frame() {
+                            if tag.is_key_frame_nalu() {
                                 self.state.last_keyframe_position =
                                     Some((self.state.accumulated_size, self.state.max_timestamp));
                             }
@@ -336,7 +349,7 @@ impl FlvOperator for LimitOperator {
                                 }
 
                                 // Emit current tag after the split if it's a keyframe
-                                if tag.is_key_frame() || !self.config.split_at_keyframes_only {
+                                if tag.is_key_frame_nalu() || !self.config.split_at_keyframes_only {
                                     #[allow(clippy::collapsible_if)]
                                     if output.send(Ok(data.clone())).await.is_err() {
                                         return;

@@ -31,6 +31,7 @@
 //!
 
 use std::{
+    error::Error,
     fs,
     io::{self},
     path::PathBuf,
@@ -116,10 +117,14 @@ impl FlvWriterTask {
     pub async fn run(&mut self, stream: BoxStream<FlvData>) -> Result<(), WriterError> {
         futures::pin_mut!(stream);
 
+        let mut error: Option<Box<dyn Error + Send + Sync>> = None;
+
+        let mut _file_size = 0;
         while let Some(result) = stream.next().await {
             match result {
                 Ok(FlvData::Header(header)) => {
                     self.handle_header(header).await?;
+                    _file_size = 11 + 4;
                 }
                 Ok(FlvData::Tag(tag)) => {
                     let tag_type = tag.tag_type;
@@ -164,6 +169,9 @@ impl FlvWriterTask {
                             tracing::error!(error = ?e, "Tag analysis failed.");
                         }
                     }
+                    // current file size
+
+                    _file_size = self.analyzer.stats.file_size;
 
                     // Log progress periodically
                     if current_total_count % 50000 == 0 {
@@ -171,7 +179,17 @@ impl FlvWriterTask {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(error = ?e, "Error received from pipeline stream. Writing continues.");
+                    // Check if the error is related to an invalid header
+                    let error_message = e.to_string();
+                    if error_message.contains("invalid header")
+                        || error_message.contains("Invalid header")
+                    {
+                        tracing::error!("Invalid FLV header detected: {}", error_message);
+                        error = Some(Box::new(flv::error::FlvError::InvalidHeader));
+                    } else {
+                        tracing::error!(error = ?e, "Error received from pipeline stream. Writing continues.");
+                        error = Some(e.into());
+                    }
                 }
                 #[allow(unreachable_patterns)]
                 Ok(_) => {
@@ -187,6 +205,15 @@ impl FlvWriterTask {
             output_files_created = self.file_counter,
             "FlvWriterTask finished writing."
         );
+
+        if let Some(err) = error {
+            tracing::error!(error = ?err, "Error occurred during writing.");
+            // Return the original error wrapped in our WriterError
+            return Err(match err.downcast::<flv::error::FlvError>() {
+                Ok(flv_err) => WriterError::Flv(*flv_err),
+                Err(err) => WriterError::State(Box::leak(err.to_string().into_boxed_str())),
+            });
+        }
 
         Ok(())
     }
@@ -229,7 +256,7 @@ impl FlvWriterTask {
         self.current_file_path = Some(output_path.clone()); // Store the path for later use
         let header_clone = header.clone();
 
-        info!(path = %output_path.display(), file_num, "Creating new output file segment.");
+        info!(segment= %file_num, path = %output_path.display(), "Opening: ");
 
         // Perform blocking file creation and writer initialization
         let new_writer = spawn_blocking(move || {
@@ -254,7 +281,7 @@ impl FlvWriterTask {
             let tags = self.current_file_tag_count;
             let file_num = self.file_counter;
 
-            info!(tags, file_num, duration_ms = ?duration_ms, "Closing file segment (delegating to blocking task).");
+            // info!(tags, file_num, duration_ms = ?duration_ms, "Closing file segment (delegating to blocking task).");
 
             // Move the writer into the blocking task for closing
             spawn_blocking(move || {
@@ -262,6 +289,14 @@ impl FlvWriterTask {
                 Ok::<(), WriterError>(()) // Indicate success within the Result
             })
             .await??; // Handle JoinError + io::Error/FlvError/WriterError
+
+            info!(
+                segment = %file_num,
+                path = %self.current_file_path.as_ref().unwrap().display(),
+                tags,
+                duration_ms,
+                "Closed:"
+            );
 
             let output_path = self.current_file_path.take().unwrap();
             match self.analyzer.build_stats() {

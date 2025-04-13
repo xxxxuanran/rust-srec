@@ -358,7 +358,7 @@ mod tests {
         }
         assert!(decoder.header_parsed);
         assert!(decoder.expecting_tag_header); // Expecting first tag header next
-        assert_eq!(buffer.len(), 4); // Header consumed
+        assert_eq!(buffer.len(), 0); // Header + PrevTagSize consumed
     }
 
     #[test]
@@ -386,6 +386,8 @@ mod tests {
             &[
                 0x46, 0x4C, 0x57, // Invalid signature 'W'
                 0x01, 0x05, 0x00, 0x00, 0x00, 0x09,
+                // Next part (start of first tag prev size)
+                0x00, 0x00, 0x00, 0x00,
             ][..],
         );
 
@@ -433,6 +435,8 @@ mod tests {
         // 1. Provide Header
         buffer.extend_from_slice(&[
             0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09, // Header
+            // Next part (start of first tag prev size)
+            0x00, 0x00, 0x00, 0x00,
         ]);
         let header_res = decoder.decode(&mut buffer).unwrap().unwrap();
         assert!(matches!(header_res, FlvData::Header(_)));

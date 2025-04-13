@@ -46,6 +46,7 @@ pub struct FlvStats {
     pub last_video_timestamp: u32,
 
     pub first_keyframe_timestamp: Option<u32>,
+    pub first_audio_timestamp: Option<u32>,
 
     pub resolution: Option<Resolution>,
     pub last_keyframe_timestamp: u32,
@@ -84,6 +85,7 @@ impl Default for FlvStats {
             video_data_rate: 0.0,
             video_frame_rate: 0.0,
             first_keyframe_timestamp: None,
+            first_audio_timestamp: None,
             audio_data_rate: 0.0,
         }
     }
@@ -95,26 +97,75 @@ impl FlvStats {
     }
 
     pub fn calculate_frame_rate(&self) -> f32 {
-        if self.last_timestamp == 0 {
+        if self.video_tag_count == 0 {
             return 0.0;
         }
-        let duration_in_seconds =
-            self.last_video_timestamp - self.first_keyframe_timestamp.unwrap_or(0);
-        (self.video_tag_count as f32) * 1000.0 / duration_in_seconds as f32
+
+        let first_timestamp = self.first_keyframe_timestamp.unwrap_or(0);
+        if self.last_video_timestamp <= first_timestamp {
+            return 0.0;
+        }
+
+        let duration_in_ms = self.last_video_timestamp - first_timestamp;
+        (self.video_tag_count as f32) * 1000.0 / duration_in_ms as f32
     }
 
     pub fn calculate_video_bitrate(&self) -> f32 {
-        if self.last_timestamp == 0 {
+        if self.video_tag_count == 0 {
             return 0.0;
         }
-        (self.video_data_size as f32) * 8.0 / self.last_timestamp as f32
+
+        let first_timestamp = self.first_keyframe_timestamp.unwrap_or(0);
+        if self.last_video_timestamp <= first_timestamp {
+            return 0.0;
+        }
+
+        let duration_in_ms = self.last_video_timestamp - first_timestamp;
+        (self.video_data_size as f32) * 8.0 / duration_in_ms as f32
     }
 
     pub fn calculate_audio_bitrate(&self) -> f32 {
-        if self.last_timestamp == 0 {
+        if self.audio_tag_count == 0 {
             return 0.0;
         }
-        (self.audio_data_size as f32) * 8.0 / self.last_timestamp as f32
+
+        let first_timestamp = self.first_audio_timestamp.unwrap_or(0);
+        if self.last_audio_timestamp <= first_timestamp {
+            return 0.0;
+        }
+
+        let duration_in_ms = self.last_audio_timestamp - first_timestamp;
+        (self.audio_data_size as f32) * 8.0 / duration_in_ms as f32
+    }
+
+    pub fn calculate_duration(&self) -> u32 {
+        let first_video_timestamp = self.first_keyframe_timestamp.unwrap_or(0);
+        let first_audio_timestamp = self.first_audio_timestamp.unwrap_or(0);
+        let first_timestamp = first_video_timestamp.min(first_audio_timestamp);
+
+        if self.has_video && self.has_audio {
+            // Use the maximum of the last video and audio timestamps
+            let last_timestamp = self.last_video_timestamp.max(self.last_audio_timestamp);
+            if last_timestamp <= first_timestamp {
+                return 0;
+            }
+            (last_timestamp - first_timestamp) / 1000
+        } else if self.has_video {
+            // Only video track present
+            if self.last_video_timestamp <= first_video_timestamp {
+                return 0;
+            }
+            (self.last_video_timestamp - first_video_timestamp) / 1000
+        } else if self.has_audio {
+            // Only audio track present
+            if self.last_audio_timestamp <= first_audio_timestamp {
+                return 0;
+            }
+            (self.last_audio_timestamp - first_audio_timestamp) / 1000
+        } else {
+            // No tracks, use the general timestamp
+            self.last_timestamp / 1000
+        }
     }
 }
 
@@ -323,6 +374,11 @@ impl FlvAnalyzer {
             }
         }
 
+        // Record the first audio timestamp we encounter
+        if self.stats.first_audio_timestamp.is_none() {
+            self.stats.first_audio_timestamp = Some(tag.timestamp_ms);
+        }
+
         let data_size = tag.data.len() as u64;
         self.stats.audio_tag_count += 1;
         self.stats.audio_tags_size += data_size + FLV_TAG_HEADER_SIZE as u64; // 11 bytes for header
@@ -410,7 +466,8 @@ impl FlvAnalyzer {
             self.stats.audio_data_rate = self.stats.calculate_audio_bitrate();
         }
 
-        self.stats.duration = self.stats.last_timestamp / 1000;
+        // Use the more accurate duration calculation method
+        self.stats.duration = self.stats.calculate_duration();
 
         Ok(self.stats.clone())
     }

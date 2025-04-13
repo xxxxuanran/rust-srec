@@ -348,7 +348,7 @@ mod tests {
                             }
                         }
                         FlvTagType::Video => {
-                            if tag.is_key_frame() {
+                            if tag.is_key_frame_nalu() {
                                 "Video (Keyframe)"
                             } else if tag.is_video_sequence_header() {
                                 "Video (Header)"

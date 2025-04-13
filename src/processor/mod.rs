@@ -83,6 +83,7 @@ pub async fn process_inputs(
                 error = ?e,
                 "Failed to process URL"
             );
+            return Err(e);
         }
     }
 
