@@ -30,24 +30,21 @@
 //! - hua0512
 //!
 
+use crate::{
+    analyzer::FlvAnalyzer,
+    script_modifier::{self, ScriptModifierError},
+};
+use chrono::Local;
+use flv::error::FlvError;
+use flv::{data::FlvData, header::FlvHeader, writer::FlvWriter};
+use std::sync::mpsc::Receiver;
 use std::{
     error::Error,
     fs,
     io::{self},
     path::PathBuf,
 };
-
-use chrono::Local;
-use flv::{data::FlvData, header::FlvHeader, writer::FlvWriter};
-use tokio::task::spawn_blocking;
-use tokio_stream::StreamExt;
 use tracing::{debug, info};
-
-use crate::{
-    analyzer::FlvAnalyzer,
-    pipeline::BoxStream,
-    script_modifier::{self, ScriptModifierError},
-};
 
 // Custom Error type (assuming WriterError is defined as before)
 #[derive(Debug, thiserror::Error)]
@@ -92,9 +89,9 @@ pub struct FlvWriterTask {
 
 impl FlvWriterTask {
     /// Creates a new writer task and ensures the output directory exists (using spawn_blocking).
-    pub async fn new(output_dir: PathBuf, base_name: String) -> Result<Self, WriterError> {
+    pub fn new(output_dir: PathBuf, base_name: String) -> Result<Self, WriterError> {
         let dir_clone = output_dir.clone();
-        spawn_blocking(move || fs::create_dir_all(&dir_clone)).await??; // First ? handles JoinError, second ? handles io::Error
+        fs::create_dir_all(&dir_clone)?; // handles io::Error
 
         info!(path = %output_dir.display(), "Output directory ensured.");
 
@@ -114,16 +111,17 @@ impl FlvWriterTask {
     }
 
     /// Consumes the stream and writes FLV data to one or more files.
-    pub async fn run(&mut self, stream: BoxStream<FlvData>) -> Result<(), WriterError> {
-        futures::pin_mut!(stream);
-
+    pub fn run(
+        &mut self,
+        receiver: Receiver<Result<FlvData, FlvError>>,
+    ) -> Result<(), WriterError> {
         let mut error: Option<Box<dyn Error + Send + Sync>> = None;
 
         let mut _file_size = 0;
-        while let Some(result) = stream.next().await {
+        while let Ok(result) = receiver.recv() {
             match result {
                 Ok(FlvData::Header(header)) => {
-                    self.handle_header(header).await?;
+                    self.handle_header(header)?;
                     _file_size = 11 + 4;
                 }
                 Ok(FlvData::Tag(tag)) => {
@@ -141,21 +139,19 @@ impl FlvWriterTask {
                     let mut writer_opt = self.current_writer.take();
 
                     // Delegate the blocking write operation
-                    let write_result = spawn_blocking(move || {
-                        match &mut writer_opt {
-                            Some(writer) => {
-                                writer.write_tag(tag_type, data, timestamp_ms)?;
-                                Ok(writer_opt) // Return the Option containing the writer
-                            }
-                            None => {
-                                // This should ideally not happen if handle_header was called first
-                                Err(WriterError::State(
-                                    "Attempted write_tag with no active writer",
-                                ))
-                            }
+
+                    let write_result = match &mut writer_opt {
+                        Some(writer) => {
+                            writer.write_tag(tag_type, data, timestamp_ms)?;
+                            Ok(writer_opt) // Return the Option containing the writer
                         }
-                    })
-                    .await?; // Handle JoinError
+                        None => {
+                            // This should ideally not happen if handle_header was called first
+                            Err(WriterError::State(
+                                "Attempted write_tag with no active writer",
+                            ))
+                        }
+                    };
 
                     // Place the writer back after the blocking operation completes
                     self.current_writer = write_result?; // Handle io::Error/FlvError/WriterError::State
@@ -198,7 +194,7 @@ impl FlvWriterTask {
             }
         }
 
-        self.close_current_writer().await?;
+        self.close_current_writer()?;
 
         info!(
             total_tags_written = self.total_tag_count,
@@ -227,8 +223,8 @@ impl FlvWriterTask {
     }
 
     /// Handles receiving an FLV Header, closing the previous file and starting a new one.
-    async fn handle_header(&mut self, header: FlvHeader) -> Result<(), WriterError> {
-        self.close_current_writer().await?;
+    fn handle_header(&mut self, header: FlvHeader) -> Result<(), WriterError> {
+        self.close_current_writer()?;
 
         // Reset non-blocking state
         self.current_file_tag_count = 0;
@@ -259,19 +255,17 @@ impl FlvWriterTask {
         info!(segment= %file_num, path = %output_path.display(), "Opening: ");
 
         // Perform blocking file creation and writer initialization
-        let new_writer = spawn_blocking(move || {
-            let output_file = std::fs::File::create(&output_path)?;
-            let buffered_writer = std::io::BufWriter::new(output_file);
-            FlvWriter::with_header(buffered_writer, &header_clone)
-        })
-        .await??; // Handle JoinError + io::Error/FlvError
+
+        let output_file = std::fs::File::create(&output_path)?;
+        let buffered_writer = std::io::BufWriter::with_capacity(1024 * 1024, output_file);
+        let new_writer = FlvWriter::with_header(buffered_writer, &header_clone)?;
 
         self.current_writer = Some(new_writer);
         Ok(())
     }
 
     /// Closes the current file writer using spawn_blocking.
-    async fn close_current_writer(&mut self) -> Result<(), WriterError> {
+    fn close_current_writer(&mut self) -> Result<(), WriterError> {
         if let Some(writer) = self.current_writer.take() {
             // Take ownership
             let duration_ms = self
@@ -284,11 +278,7 @@ impl FlvWriterTask {
             // info!(tags, file_num, duration_ms = ?duration_ms, "Closing file segment (delegating to blocking task).");
 
             // Move the writer into the blocking task for closing
-            spawn_blocking(move || {
-                writer.close()?; // Blocking close (flushes BufWriter)
-                Ok::<(), WriterError>(()) // Indicate success within the Result
-            })
-            .await??; // Handle JoinError + io::Error/FlvError/WriterError
+            writer.close()?; // Blocking close (flushes BufWriter)
 
             info!(
                 segment = %file_num,
@@ -303,8 +293,7 @@ impl FlvWriterTask {
                 Ok(stats) => {
                     info!("Path : {}: {}", output_path.display(), stats);
                     // Modify the script data section by injecting stats
-                    match script_modifier::inject_stats_into_script_data(&output_path, stats).await
-                    {
+                    match script_modifier::inject_stats_into_script_data(&output_path, stats) {
                         Ok(_) => {
                             debug!("Successfully injected stats into script data section.");
                         }

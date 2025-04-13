@@ -8,7 +8,6 @@ use flv_fix::pipeline::PipelineConfig;
 use siphon::{DownloaderConfig, ProxyAuth, ProxyConfig, ProxyType};
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
-
 mod cli;
 mod processor;
 mod utils;
