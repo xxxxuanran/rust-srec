@@ -240,7 +240,7 @@ pub fn expand_filename_template(
                             // Extract filename from URL path
                             let file_name = url
                                 .path_segments()
-                                .and_then(|segments| segments.last())
+                                .and_then(|mut segments| segments.next_back())
                                 .unwrap_or("download");
 
                             // Remove extension if present
