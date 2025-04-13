@@ -172,6 +172,10 @@ impl ScriptKeyframesFillerOperator {
             .config
             .keyframe_duration_ms
             .div_ceil(MIN_INTERVAL_BETWEEN_KEYFRAMES_MS);
+        debug!(
+            "{} Keyframes count: {}, keyframe duration: {}ms",
+            self.context.name, keyframes_count, self.config.keyframe_duration_ms
+        );
         let double_array_size = 2 * keyframes_count as usize;
 
         // Pre-allocate with a reasonable size estimate
@@ -207,6 +211,8 @@ impl ScriptKeyframesFillerOperator {
 
         // End of object
         amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
+
+        buffer.flush()?;
 
         debug!("New script data payload size: {}", buffer.len());
 
@@ -271,13 +277,23 @@ impl ScriptKeyframesFillerOperator {
         buffer: &mut Vec<u8>,
         props: &[(Cow<'_, str>, Amf0Value)],
     ) -> io::Result<()> {
+        let mut count = 0;
         // Add any remaining custom properties from the original object
         for (key, value) in props.iter() {
             if !NATURAL_METADATA_KEY_ORDER.contains(&key.as_ref()) {
+                debug!(
+                    "{} Adding custom property: {} with value: {:?}",
+                    self.context.name, key, value
+                );
                 write_amf_property_key!(buffer, key);
                 amf0::Amf0Encoder::encode(buffer, value).unwrap();
+                count += 1;
             }
         }
+        debug!(
+            "{} Added {} custom properties to the script tag",
+            self.context.name, count
+        );
         Ok(())
     }
 
@@ -402,11 +418,12 @@ impl ScriptKeyframesFillerOperator {
     fn get_default_metadata_value(&self, key: &str) -> Option<Amf0Value> {
         match key {
             // Booleans - Defaulting to true might be optimistic
-            "hasAudio" | "hasVideo" | "stereo" => Some(Amf0Value::Boolean(true)),
+            "hasAudio" | "hasVideo" | "hasMetadata" | "stereo" => Some(Amf0Value::Boolean(true)),
             // Numeric - Defaulting to 0 might be safer than assuming values
             "duration"
             | "width"
             | "height"
+            | "datasize"
             | "videosize"
             | "audiosize"
             | "lasttimestamp"
@@ -472,7 +489,7 @@ impl FlvOperator for ScriptKeyframesFillerOperator {
 
                                     let tag_clone = tag.clone();
                                     let inject_script =
-                                        self.add_keyframes_to_amf(tag_clone).unwrap_or(tag);
+                                        self.add_keyframes_to_amf(tag_clone).unwrap();
                                     if output.send(Ok(FlvData::Tag(inject_script))).await.is_err() {
                                         return; // Output closed
                                     }

@@ -55,14 +55,12 @@ pub fn inject_stats_into_script_data(
     stats: FlvStats,
 ) -> Result<(), ScriptModifierError> {
     let file_path_clone = file_path.to_path_buf();
-    // Use tokio's spawn_blocking to run the CPU-bound task on a separate thread
-    update_script_metadata(&file_path_clone, &stats)
-        .map_err(|e| {
-            ScriptModifierError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Task join error: {}", e),
-            ))
-        })?;
+    update_script_metadata(&file_path_clone, &stats).map_err(|e| {
+        ScriptModifierError::Io(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Task join error: {}", e),
+        ))
+    })?;
 
     Ok(())
 }
@@ -309,16 +307,16 @@ fn update_script_metadata(
             }
         }
 
+        let mut count = 0;
         for (key, value) in props.iter() {
-            let key_str = key.to_string();
-
-            if NATURAL_METADATA_KEY_ORDER.contains(&key_str.as_str()) {
-                continue;
+            if !NATURAL_METADATA_KEY_ORDER.contains(&key.as_ref()) {
+                debug!("Adding custom property: {} with value: {:?}", key, value);
+                write_amf_property_key!(buffer, key);
+                amf0::Amf0Encoder::encode(&mut buffer, value).unwrap();
+                count += 1;
             }
-
-            write_amf_property_key!(&mut buffer, key);
-            Amf0Encoder::encode(&mut buffer, value).unwrap();
         }
+        debug!("Injected {} custom metadata keys", count);
 
         write_amf_property_key!(&mut buffer, "keyframes");
         buffer.write_u8(Amf0Marker::Object as u8).unwrap();
@@ -329,8 +327,8 @@ fn update_script_metadata(
         buffer.write_u8(Amf0Marker::StrictArray as u8).unwrap();
         buffer.write_u32::<BigEndian>(keyframes_length).unwrap();
 
-        for i in 0..keyframes_length {
-            let keyframe_time = stats.keyframes[i as usize].0;
+        for keyframe in stats.keyframes.iter() {
+            let keyframe_time = keyframe.0;
             trace!("Injecting keyframe at time {}", keyframe_time);
             amf0::Amf0Encoder::encode_number(&mut buffer, keyframe_time).unwrap();
         }
@@ -338,15 +336,19 @@ fn update_script_metadata(
         write_amf_property_key!(&mut buffer, "filepositions");
         buffer.push(Amf0Marker::StrictArray as u8);
         buffer.write_u32::<BigEndian>(keyframes_length)?;
-        for i in 0..keyframes_length {
-            let keyframe_pos = stats.keyframes[i as usize].1 as f64;
+
+        for keyframe in stats.keyframes.iter() {
+            let keyframe_pos = keyframe.1 as f64;
             trace!("Injecting keyframe at position {}", keyframe_pos);
             amf0::Amf0Encoder::encode_number(&mut buffer, keyframe_pos).unwrap();
         }
-        buffer.flush()?;
 
+        // close keyframes object
         amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
+        // close script data object
         amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
+
+        buffer.flush()?;
 
         let new_payload_size = buffer.len();
         debug!("New script data size: {}", new_payload_size);
