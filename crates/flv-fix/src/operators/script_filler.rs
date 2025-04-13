@@ -61,7 +61,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
 
 const DEFAULT_KEYFRAME_INTERVAL_MS: u32 = (3.5 * 60.0 * 60.0 * 1000.0) as u32; // 3.5 hours in ms
-const MIN_INTERVAL_BETWEEN_KEYFRAMES_MS: u32 = 1900; // 1.9 seconds in ms
+pub const MIN_INTERVAL_BETWEEN_KEYFRAMES_MS: u32 = 1900; // 1.9 seconds in ms
 
 pub static NATURAL_METADATA_KEY_ORDER: &[&str] = &[
     "duration",

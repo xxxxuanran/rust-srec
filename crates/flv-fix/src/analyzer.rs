@@ -9,6 +9,7 @@ use flv::{
 use std::fmt;
 use tracing::{debug, error};
 
+use crate::operators::script_filler::MIN_INTERVAL_BETWEEN_KEYFRAMES_MS;
 use crate::utils::{FLV_HEADER_SIZE, FLV_PREVIOUS_TAG_SIZE, FLV_TAG_HEADER_SIZE};
 
 // Stats structure to hold all the metrics
@@ -410,14 +411,23 @@ impl FlvAnalyzer {
             self.has_video_sequence_header = true;
         } else if tag.is_key_frame() {
             let position = self.stats.file_size;
-            self.stats
-                .keyframes
-                .push((timestamp as f64 / 1000.0, position));
-            self.stats.last_keyframe_timestamp = timestamp;
-            self.stats.last_keyframe_position = position;
-            // set the first keyframe timestamp
-            if self.stats.first_keyframe_timestamp.is_none() {
-                self.stats.first_keyframe_timestamp = Some(timestamp);
+
+            // Respect the minimum interval between keyframes
+            let add_keyframe = self.stats.last_keyframe_timestamp == 0
+                || (timestamp - self.stats.last_keyframe_timestamp
+                    >= MIN_INTERVAL_BETWEEN_KEYFRAMES_MS);
+            if add_keyframe {
+                // Store the position and timestamp for this keyframe
+                self.stats
+                    .keyframes
+                    .push((timestamp as f64 / 1000.0, position));
+                self.stats.last_keyframe_timestamp = timestamp;
+                self.stats.last_keyframe_position = position;
+
+                // Set first keyframe timestamp if not already set
+                if self.stats.first_keyframe_timestamp.is_none() {
+                    self.stats.first_keyframe_timestamp = Some(timestamp);
+                }
             }
         }
 
