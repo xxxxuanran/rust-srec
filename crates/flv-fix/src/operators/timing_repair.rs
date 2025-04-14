@@ -57,6 +57,8 @@ use std::f64;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use super::FlvOperator;
+
 /// The tolerance for timestamp correction due to floating point conversion errors
 /// Since millisecond precision (1/1000 of a second) can't exactly represent many common frame rates
 /// (e.g., 30fps = 33.33ms), we allow +/- 1ms tolerance to account for rounding
@@ -439,10 +441,12 @@ impl TimingRepairOperator {
         };
         Self { context, config }
     }
+}
 
+impl FlvOperator for TimingRepairOperator {
     /// Process method that receives FLV data, corrects timing issues, and forwards the data
-    pub async fn process(
-        &self,
+    async fn process(
+        &mut self,
         input: AsyncReceiver<Result<FlvData, FlvError>>,
         output: AsyncSender<Result<FlvData, FlvError>>,
     ) {
@@ -728,6 +732,14 @@ impl TimingRepairOperator {
             state.rebound_count,
             state.discontinuity_count
         );
+    }
+
+    fn context(&self) -> &Arc<StreamerContext> {
+        &self.context
+    }
+
+    fn name(&self) -> &'static str {
+        "TimingRepairOperator"
     }
 }
 

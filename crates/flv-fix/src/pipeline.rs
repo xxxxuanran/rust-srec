@@ -144,7 +144,7 @@ impl FlvPipeline {
         let mut limit_operator = LimitOperator::with_config(context.clone(), limit_config);
         let mut gop_sort_operator = GopSortOperator::new(context.clone());
         let mut script_filter_operator = ScriptFilterOperator::new(context.clone());
-        let timing_repair_operator =
+        let mut timing_repair_operator =
             TimingRepairOperator::new(context.clone(), TimingRepairConfig::default());
         let mut split_operator = SplitOperator::new(context.clone());
         let mut time_consistency_operator =
