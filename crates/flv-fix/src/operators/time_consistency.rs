@@ -44,7 +44,7 @@ use flv::error::FlvError;
 use flv::tag::FlvUtil;
 use kanal::AsyncReceiver as Receiver;
 use kanal::AsyncSender as Sender;
-use std::cmp::min;
+use std::cmp::max;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -127,7 +127,7 @@ impl TimeConsistencyOperator {
             match self.continuity_mode {
                 ContinuityMode::Continuous => {
                     // Make current segment continue from where the previous one ended
-                    state.timestamp_offset = last as i64 - first as i64 + 1;
+                    state.timestamp_offset = last as i64 - first as i64;
                     debug!(
                         "{} Maintaining continuous timeline: offset = {}ms",
                         self.context.name, state.timestamp_offset
@@ -185,9 +185,13 @@ impl FlvOperator for TimeConsistencyOperator {
                                 // apply delta to script data tags
                                 if state.timestamp_offset != 0 {
                                     // Calculate the corrected timestamp, ensure it doesn't go negative
-                                    let corrected =
-                                        (tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
-                                    tag.timestamp_ms = min(0, corrected);
+                                    let delta: i64 = if state.timestamp_offset > 0 {
+                                        state.timestamp_offset as i64
+                                    } else {
+                                        -(tag.timestamp_ms as i64)
+                                    };
+                                    let corrected = (tag.timestamp_ms as i64 + delta) as u32;
+                                    tag.timestamp_ms = max(0, corrected);
 
                                     debug!(
                                         "{} Adjusted script data timestamp: {}ms -> {}ms",
@@ -247,7 +251,7 @@ impl FlvOperator for TimeConsistencyOperator {
                             if state.timestamp_offset != 0 {
                                 // Calculate the corrected timestamp, ensure it doesn't go negative
                                 let corrected =
-                                    (tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
+                                    max(0, tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
                                 tag.timestamp_ms = corrected;
 
                                 trace!(

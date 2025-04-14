@@ -106,7 +106,7 @@ impl Default for TimingRepairConfig {
             default_frame_rate: 30.0,
             default_audio_rate: 44100.0,
             max_discontinuity: 1000, // 1 second
-            debug: false,
+            debug: true,
         }
     }
 }
@@ -114,7 +114,7 @@ impl Default for TimingRepairConfig {
 /// Stream timing state for the repair operator
 struct TimingState {
     /// Current accumulated offset to apply to timestamps
-    delta: i32,
+    delta: i64,
 
     /// Last tag processed (any type)
     last_tag: Option<FlvTag>,
@@ -136,9 +136,6 @@ struct TimingState {
 
     /// Expected interval between audio samples in ms
     audio_sample_interval: u32,
-
-    /// Timestamp of the last discontinuity detected
-    last_discontinuity: Option<u32>,
 
     /// Count of corrections applied (for statistics)
     correction_count: u32,
@@ -168,7 +165,6 @@ impl TimingState {
             audio_rate: config.default_audio_rate,
             video_frame_interval,
             audio_sample_interval,
-            last_discontinuity: None,
             correction_count: 0,
             rebound_count: 0,
             discontinuity_count: 0,
@@ -187,9 +183,6 @@ impl TimingState {
         self.audio_rate = config.default_audio_rate;
         self.audio_sample_interval =
             Self::calculate_audio_sample_interval(config.default_audio_rate);
-        self.last_discontinuity = None;
-
-        // Keep statistics for logging
     }
 
     /// Calculate the video frame interval in milliseconds based on frame rate
@@ -302,12 +295,8 @@ impl TimingState {
             current.saturating_sub((-self.delta) as u32)
         };
 
-        // Calculate the absolute difference between expected and last timestamp
-        let diff = if expected > last.timestamp_ms {
-            expected - last.timestamp_ms
-        } else {
-            last.timestamp_ms - expected
-        };
+        // Calculate the difference between expected and last timestamp
+        let diff: i64 = (expected - last.timestamp_ms).into();
 
         // Determine threshold based on media type, considering rounding errors
         let base_threshold = match tag.tag_type {
@@ -323,29 +312,19 @@ impl TimingState {
         match config.strategy {
             RepairStrategy::Strict => {
                 // In strict mode, we check if the timestamp differs from what we'd expect
-                // based on the frame rate, accounting for rounding errors
                 if tag.is_video_tag() && self.last_video_tag.is_some() {
-                    // Calculate the expected interval based on the frame rate with fractional precision
-                    let exact_interval = 1000.0 / self.frame_rate;
-
-                    // Since millisecond precision (ie 1/1000 of a second) causes rounding errors
-                    // (e.g., 30fps → 33.33ms which gets truncated), we allow for ±1ms tolerance
-                    let lower_bound = (exact_interval - TOLERANCE as f64).max(0.0).round() as u32;
-                    let upper_bound = (exact_interval + TOLERANCE as f64).round() as u32;
-
-                    // Check if the observed interval falls outside our tolerance range
-                    diff < lower_bound || diff > upper_bound
+                    diff < 0 || diff > threshold.into()
                 } else {
                     // For non-video tags or when no video history exists
-                    diff > threshold * 2 // More lenient for non-video
+                    diff > threshold as i64 * 2 // More lenient for non-video
                 }
             }
-            RepairStrategy::Relaxed => diff > config.max_discontinuity,
+            RepairStrategy::Relaxed => diff > config.max_discontinuity as i64,
         }
     }
 
     /// Calculate a new delta correction when a problem is detected
-    fn calculate_delta_correction(&mut self, tag: &FlvTag) -> i32 {
+    fn calculate_delta_correction(&mut self, tag: &FlvTag) -> i64 {
         let current = tag.timestamp_ms;
         let mut new_delta = self.delta;
         let last_ts = self.last_tag.as_ref().map(|t| t.timestamp_ms).unwrap_or(0);
@@ -353,28 +332,18 @@ impl TimingState {
         if tag.is_video_tag() && self.last_video_tag.is_some() {
             let last_video = self.last_video_tag.as_ref().unwrap();
 
-            // Calculate ideal next frame timestamp with precision
-            let ideal_next_ts = if !last_video.is_video_sequence_header() {
-                // Use precise frame rate calculation
-                let exact_interval = 1000.0 / self.frame_rate;
+            // Calculate ideal next frame timestamp
+            let ideal_next_ts = last_video.timestamp_ms + self.video_frame_interval;
 
-                // Round to nearest millisecond to avoid fractional timestamps
-                (last_video.timestamp_ms as f64 + exact_interval).round() as u32
-            } else {
-                // For sequence headers, just use the interval directly
-                last_video.timestamp_ms + self.video_frame_interval
-            };
-
-            new_delta = ideal_next_ts as i32 - current as i32;
+            new_delta = ideal_next_ts as i64 - current as i64;
         } else if tag.is_audio_tag() && self.last_audio_tag.is_some() {
-            // Similar audio precision handling
             let last_audio = self.last_audio_tag.as_ref().unwrap();
-            new_delta =
-                (last_audio.timestamp_ms + self.audio_sample_interval) as i32 - current as i32;
+            let ideal_next_ts = last_audio.timestamp_ms + self.audio_sample_interval;
+            new_delta = ideal_next_ts as i64 - current as i64;
         } else if let Some(last) = &self.last_tag {
             // No type-specific last tag, use generic last tag
             let interval = max(self.video_frame_interval, self.audio_sample_interval);
-            new_delta = (last.timestamp_ms + interval) as i32 - current as i32;
+            new_delta = (last.timestamp_ms + interval) as i64 - current as i64;
         }
 
         let expected = if new_delta >= 0 {
@@ -388,36 +357,33 @@ impl TimingState {
             // to avoid negative timestamps or rebounding
             // in those cases, we use the last timestamp as a reference to calculate the delta
             if tag.is_video_tag() {
-                // Use precise frame rate calculation
-                let exact_interval = 1000.0 / self.frame_rate;
-                // Round to nearest millisecond to avoid fractional timestamps
-                let adjusted_ts = (last_ts as f64 + exact_interval).round() as u32;
+                let adjusted_ts = (last_ts as u32 + self.video_frame_interval) as u32;
                 new_delta = if adjusted_ts >= current {
-                    (adjusted_ts - current) as i32
+                    (adjusted_ts - current) as i64
                 } else {
-                    -((current - adjusted_ts) as i32)
+                    -((current - adjusted_ts) as i64)
                 };
             } else if tag.is_audio_tag() {
                 // calculate ideal next audio timestamp
                 let adjusted_ts = last_ts + self.audio_sample_interval;
                 new_delta = if adjusted_ts >= current {
-                    (adjusted_ts - current) as i32
+                    (adjusted_ts - current) as i64
                 } else {
-                    -((current - adjusted_ts) as i32)
-                };
-            } else {
-                // No type-specific last tag, use generic last tag
-                let interval = max(self.video_frame_interval, self.audio_sample_interval);
-                let adjusted_ts = last_ts + interval;
-                new_delta = if adjusted_ts >= current {
-                    (adjusted_ts - current) as i32
-                } else {
-                    -((current - adjusted_ts) as i32)
+                    -((current - adjusted_ts) as i64)
                 };
             }
         }
 
         new_delta
+    }
+
+    fn update_last_tags(&mut self, tag: &FlvTag) {
+        self.last_tag = Some(tag.clone());
+        if tag.is_audio_tag() {
+            self.last_audio_tag = Some(tag.clone());
+        } else if tag.is_video_tag() {
+            self.last_video_tag = Some(tag.clone());
+        }
     }
 }
 
@@ -440,6 +406,107 @@ impl TimingRepairOperator {
             ..Default::default()
         };
         Self { context, config }
+    }
+
+    /// Handle script tag (metadata), update timing params, and forward the tag.
+    async fn handle_script_tag(
+        &self,
+        tag: &mut FlvTag,
+        state: &mut TimingState,
+        output: &AsyncSender<Result<FlvData, FlvError>>,
+    ) -> bool {
+        let mut cursor = std::io::Cursor::new(tag.data.clone());
+        if let Ok(amf_data) = ScriptData::demux(&mut cursor) {
+            if amf_data.name == "onMetaData" && !amf_data.data.is_empty() {
+                match &amf_data.data[0] {
+                    Amf0Value::Object(props) => {
+                        let properties = props
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.clone()))
+                            .collect::<HashMap<String, Amf0Value>>();
+                        state.update_timing_params(&properties);
+                        if self.config.debug {
+                            debug!(
+                                "{} TimingRepair: Updated timing params - video interval: {}ms, audio interval: {}ms",
+                                self.context.name,
+                                state.video_frame_interval,
+                                state.audio_sample_interval
+                            );
+                        }
+                    }
+                    Amf0Value::StrictArray(items) => {
+                        if self.config.debug {
+                            debug!(
+                                "{} TimingRepair: Received metadata as StrictArray with {} items",
+                                self.context.name,
+                                items.len()
+                            );
+                        }
+                        let mut framerate_value: Option<f64> = None;
+                        let mut audio_rate_value: Option<f64> = None;
+                        for item in items.iter() {
+                            if let Amf0Value::Number(value) = item {
+                                if *value > 10.0 && *value < 500.0 && framerate_value.is_none() {
+                                    framerate_value = Some(*value);
+                                    if self.config.debug {
+                                        debug!(
+                                            "{} TimingRepair: Found potential framerate in StrictArray: {}",
+                                            self.context.name, *value
+                                        );
+                                    }
+                                } else if (*value == 44100.0
+                                    || *value == 48000.0
+                                    || *value == 22050.0
+                                    || *value == 11025.0
+                                    || *value == 88200.0
+                                    || *value == 96000.0)
+                                    && audio_rate_value.is_none()
+                                {
+                                    audio_rate_value = Some(*value);
+                                    if self.config.debug {
+                                        debug!(
+                                            "{} TimingRepair: Found potential audio sample rate in StrictArray: {}",
+                                            self.context.name, *value
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if framerate_value.is_some() || audio_rate_value.is_some() {
+                            let mut properties = HashMap::new();
+                            if let Some(fps) = framerate_value {
+                                properties.insert("framerate".to_string(), Amf0Value::Number(fps));
+                            }
+                            if let Some(rate) = audio_rate_value {
+                                properties
+                                    .insert("audiosamplerate".to_string(), Amf0Value::Number(rate));
+                            }
+                            state.update_timing_params(&properties);
+                            if self.config.debug {
+                                debug!(
+                                    "{} TimingRepair: Updated timing params from StrictArray - video interval: {}ms, audio interval: {}ms",
+                                    self.context.name,
+                                    state.video_frame_interval,
+                                    state.audio_sample_interval
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        if self.config.debug {
+                            debug!(
+                                "{} TimingRepair: Metadata format not supported: {:?}",
+                                self.context.name,
+                                amf_data.data[0].marker()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Forward script tag
+        let send_result = output.send(Ok(FlvData::Tag(tag.clone()))).await;
+        send_result.is_ok()
     }
 }
 
@@ -478,140 +545,7 @@ impl FlvOperator for TimingRepairOperator {
 
                             // Handle script tags (metadata)
                             if tag.is_script_tag() {
-                                let mut cursor = std::io::Cursor::new(tag.data.clone());
-                                if let Ok(amf_data) = ScriptData::demux(&mut cursor) {
-                                    if amf_data.name == "onMetaData" && !amf_data.data.is_empty() {
-                                        match &amf_data.data[0] {
-                                            Amf0Value::Object(props) => {
-                                                // Create a HashMap for easier property access
-                                                let properties = props
-                                                    .iter()
-                                                    .map(|(k, v)| (k.to_string(), v.clone()))
-                                                    .collect::<HashMap<String, Amf0Value>>();
-
-                                                state.update_timing_params(&properties);
-
-                                                if self.config.debug {
-                                                    debug!(
-                                                        "{} TimingRepair: Updated timing params - video interval: {}ms, audio interval: {}ms",
-                                                        self.context.name,
-                                                        state.video_frame_interval,
-                                                        state.audio_sample_interval
-                                                    );
-                                                }
-                                            }
-                                            Amf0Value::StrictArray(items) => {
-                                                // StrictArray doesn't have named key-value pairs like Object,
-                                                // but some encoders might use it with a specific structure.
-                                                // Try to find framerate and audio sample rate values in common positions
-                                                if self.config.debug {
-                                                    debug!(
-                                                        "{} TimingRepair: Received metadata as StrictArray with {} items",
-                                                        self.context.name,
-                                                        items.len()
-                                                    );
-                                                }
-
-                                                // Try to extract timing information based on common patterns
-                                                // Some encoders put framerate as the first or third numeric value
-                                                let mut framerate_value: Option<f64> = None;
-                                                let mut audio_rate_value: Option<f64> = None;
-
-                                                // Look for numeric values that might be frame rate (typically 23.976-60)
-                                                // or audio sample rate (typically 44100, 48000, etc.)
-                                                for item in items.iter() {
-                                                    if let Amf0Value::Number(value) = item {
-                                                        // Potential frame rate (common video frame rates are between 10-500)
-                                                        if *value > 10.0
-                                                            && *value < 500.0
-                                                            && framerate_value.is_none()
-                                                        {
-                                                            framerate_value = Some(*value);
-                                                            if self.config.debug {
-                                                                debug!(
-                                                                    "{} TimingRepair: Found potential framerate in StrictArray: {}",
-                                                                    self.context.name, *value
-                                                                );
-                                                            }
-                                                        }
-                                                        // Potential audio sample rate
-                                                        else if (*value == 44100.0
-                                                            || *value == 48000.0
-                                                            || *value == 22050.0
-                                                            || *value == 11025.0
-                                                            || *value == 88200.0
-                                                            || *value == 96000.0)
-                                                            && audio_rate_value.is_none()
-                                                        {
-                                                            audio_rate_value = Some(*value);
-                                                            if self.config.debug {
-                                                                debug!(
-                                                                    "{} TimingRepair: Found potential audio sample rate in StrictArray: {}",
-                                                                    self.context.name, *value
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                // Apply any found values to update timing parameters
-                                                if framerate_value.is_some()
-                                                    || audio_rate_value.is_some()
-                                                {
-                                                    let mut properties = HashMap::new();
-
-                                                    if let Some(fps) = framerate_value {
-                                                        properties.insert(
-                                                            "framerate".to_string(),
-                                                            Amf0Value::Number(fps),
-                                                        );
-                                                    }
-
-                                                    if let Some(rate) = audio_rate_value {
-                                                        properties.insert(
-                                                            "audiosamplerate".to_string(),
-                                                            Amf0Value::Number(rate),
-                                                        );
-                                                    }
-
-                                                    state.update_timing_params(&properties);
-
-                                                    if self.config.debug {
-                                                        debug!(
-                                                            "{} TimingRepair: Updated timing params from StrictArray - video interval: {}ms, audio interval: {}ms",
-                                                            self.context.name,
-                                                            state.video_frame_interval,
-                                                            state.audio_sample_interval
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                if self.config.debug {
-                                                    debug!(
-                                                        "{} TimingRepair: Metadata format not supported: {:?}",
-                                                        self.context.name,
-                                                        amf_data.data[0].marker()
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Script tags should have timestamp 0
-                                if tag.timestamp_ms != 0 {
-                                    tag.timestamp_ms = 0;
-                                    if self.config.debug {
-                                        debug!(
-                                            "{} TimingRepair: Reset script tag timestamp to 0",
-                                            self.context.name
-                                        );
-                                    }
-                                }
-
-                                // Forward script tag
-                                if output.send(Ok(data)).await.is_err() {
+                                if !self.handle_script_tag(tag, &mut state, &output).await {
                                     return;
                                 }
                                 continue;
@@ -622,13 +556,15 @@ impl FlvOperator for TimingRepairOperator {
 
                             // Check for timestamp rebounds
                             if state.is_timestamp_rebounded(tag) {
-                                // warn!("rebounded tag is : {:?}", tag.tag_type);
                                 state.rebound_count += 1;
                                 let new_delta = state.calculate_delta_correction(tag);
 
                                 warn!(
-                                    "{} TimingRepair: Timestamp rebound detected: {}ms would go back in time - applying correction delta: {}ms",
-                                    self.context.name, tag.timestamp_ms, new_delta
+                                    "{} TimingRepair: Timestamp rebound detected: {}ms, last ts: {}ms,  would go back in time - applying correction delta: {}ms",
+                                    self.context.name,
+                                    tag.timestamp_ms,
+                                    state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
+                                    new_delta
                                 );
 
                                 state.delta = new_delta;
@@ -640,43 +576,43 @@ impl FlvOperator for TimingRepairOperator {
                                 let new_delta = state.calculate_delta_correction(tag);
 
                                 warn!(
-                                    "{} TimingRepair: Timestamp discontinuity detected: {}ms, applying correction delta: {}ms",
-                                    self.context.name, tag.timestamp_ms, new_delta
+                                    "{} TimingRepair: Timestamp discontinuity detected: {}ms, last ts: {}ms, applying correction delta: {}ms",
+                                    self.context.name,
+                                    tag.timestamp_ms,
+                                    state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
+                                    new_delta
                                 );
 
                                 state.delta = new_delta;
                                 need_correction = true;
-                                state.last_discontinuity = Some(tag.timestamp_ms);
                             }
 
                             // Apply correction if needed
                             if state.delta != 0 || need_correction {
-                                // Apply the correction delta
-                                // probably not gonna happen, but just in case
-                                let corrected_timestamp = if tag.timestamp_ms as i32 + state.delta
+                                let corrected_timestamp = if tag.timestamp_ms as i64 + state.delta
                                     < 0
                                 {
                                     warn!(
                                         "{} TimingRepair: Negative timestamp detected, applying frame-rate aware correction",
                                         self.context.name
                                     );
-                                    // Avoid negative timestamps - use frame-rate aware correction
                                     if let Some(last) = &state.last_tag {
                                         if tag.is_video_tag() {
-                                            // Calculate ideal timestamp using frame rate
-                                            let interval =
-                                                (1000.0 / state.frame_rate).round() as u32;
-                                            last.timestamp_ms + interval
+                                            last.timestamp_ms + state.video_frame_interval
                                         } else if tag.is_audio_tag() {
                                             last.timestamp_ms + state.audio_sample_interval
                                         } else {
-                                            last.timestamp_ms + 1
+                                            last.timestamp_ms
+                                                + max(
+                                                    state.video_frame_interval,
+                                                    state.audio_sample_interval,
+                                                )
                                         }
                                     } else {
                                         0
                                     }
                                 } else {
-                                    (tag.timestamp_ms as i32 + state.delta) as u32
+                                    (tag.timestamp_ms as i64 + state.delta) as u32
                                 };
 
                                 tag.timestamp_ms = corrected_timestamp;
@@ -694,12 +630,7 @@ impl FlvOperator for TimingRepairOperator {
                             }
 
                             // Update state with this tag
-                            if tag.is_audio_tag() {
-                                state.last_audio_tag = Some(tag.clone());
-                            } else if tag.is_video_tag() {
-                                state.last_video_tag = Some(tag.clone());
-                            }
-                            state.last_tag = Some(tag.clone());
+                            state.update_last_tags(tag);
 
                             // Forward the tag with corrected timestamp
                             if output.send(Ok(data)).await.is_err() {
