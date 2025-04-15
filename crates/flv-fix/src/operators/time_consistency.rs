@@ -246,7 +246,7 @@ impl FlvOperator for TimeConsistencyOperator {
                                     max(0, tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
                                 tag.timestamp_ms = corrected;
 
-                                debug!(
+                                trace!(
                                     "{} Adjusted timestamp: {}ms -> {}ms",
                                     self.context.name, original_timestamp, corrected
                                 );
