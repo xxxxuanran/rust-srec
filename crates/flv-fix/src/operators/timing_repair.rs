@@ -357,7 +357,7 @@ impl TimingState {
             // to avoid negative timestamps or rebounding
             // in those cases, we use the last timestamp as a reference to calculate the delta
             if tag.is_video_tag() {
-                let adjusted_ts = (last_ts as u32 + self.video_frame_interval) as u32;
+                let adjusted_ts = last_ts + self.video_frame_interval;
                 new_delta = if adjusted_ts >= current {
                     (adjusted_ts - current) as i64
                 } else {

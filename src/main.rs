@@ -8,11 +8,14 @@ use flv_fix::pipeline::PipelineConfig;
 use siphon::{DownloaderConfig, ProxyAuth, ProxyConfig, ProxyType};
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
+
 mod cli;
+mod error;
 mod processor;
 mod utils;
 
 use cli::CliArgs;
+use utils::progress::ProgressManager;
 use utils::{format_bytes, format_duration, parse_size, parse_time};
 
 #[tokio::main]
@@ -95,6 +98,11 @@ async fn main() {
     // Determine output directory
     let output_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("./fix"));
 
+    // Create a global progress manager
+    // For multiple inputs, we don't know the total size in advance
+    let mut progress_manager = ProgressManager::new(None);
+    progress_manager.set_status("Initializing...");
+
     // Handle proxy configuration
     let (proxy_config, _use_system_proxy) = if args.no_proxy {
         // No proxy flag overrides everything else
@@ -172,6 +180,9 @@ async fn main() {
         ..DownloaderConfig::default()
     });
 
+    // Update progress status
+    progress_manager.set_status(&format!("Processing {} input(s)...", args.input.len()));
+
     // Process input files
     match processor::process_inputs(
         &args.input,
@@ -180,13 +191,16 @@ async fn main() {
         download_config,
         args.enable_fix,
         args.output_name_template.as_deref(),
+        &mut progress_manager,
     )
     .await
     {
         Ok(_) => {
+            progress_manager.finish("All processing completed successfully");
             info!("All processing completed");
         }
         Err(e) => {
+            progress_manager.finish(&format!("Processing failed: {}", e));
             error!(error = ?e, "Processing failed");
             exit(1);
         }

@@ -49,7 +49,7 @@ pub struct PipelineConfig {
     pub file_size_limit: u64,
 
     /// Maximum duration limit in seconds (0 = unlimited)
-    pub duration_limit: f32,
+    pub duration_limit: f64,
 
     /// Strategy for timestamp repair
     pub repair_strategy: RepairStrategy,

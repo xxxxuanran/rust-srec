@@ -186,7 +186,7 @@ impl FlvOperator for TimeConsistencyOperator {
                                 if state.timestamp_offset != 0 {
                                     // Calculate the corrected timestamp, ensure it doesn't go negative
                                     let delta: i64 = if state.timestamp_offset > 0 {
-                                        state.timestamp_offset as i64
+                                        state.timestamp_offset 
                                     } else {
                                         -(tag.timestamp_ms as i64)
                                     };

@@ -43,6 +43,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
+    time::Instant,
 };
 use tracing::{debug, info};
 
@@ -60,6 +61,15 @@ pub enum WriterError {
     #[error("Script modifier error: {0}")]
     ScriptModifier(#[from] ScriptModifierError),
 }
+
+/// Type alias for the status callback function that provides current download statistics
+pub type StatusCallback = dyn Fn(Option<&PathBuf>, u64, f64, Option<u32>) + Send + 'static;
+
+/// Type alias for the segment open callback function
+pub type SegmentOpenCallback = dyn Fn(&PathBuf, u32) + Send + 'static;
+
+/// Type alias for the segment close callback function
+pub type SegmentCloseCallback = dyn Fn(&PathBuf, u32, u64, Option<u32>) + Send + 'static;
 
 /// Manages the writing of processed FLV data to output files using synchronous I/O
 /// delegated via spawn_blocking.
@@ -85,6 +95,17 @@ pub struct FlvWriterTask {
     total_tag_count: u64,
     current_file_start_time: Option<u32>,
     current_file_last_time: Option<u32>,
+
+    // Stats tracking
+    current_file_start_instant: Option<Instant>,
+    current_file_size: u64,
+
+    // Status callback
+    status_callback: Option<Box<StatusCallback>>,
+
+    // Segment open/close callbacks
+    on_segment_open: Option<Box<SegmentOpenCallback>>,
+    on_segment_close: Option<Box<SegmentCloseCallback>>,
 }
 
 impl FlvWriterTask {
@@ -107,7 +128,85 @@ impl FlvWriterTask {
             current_file_last_time: None,
             analyzer: FlvAnalyzer::default(),
             current_file_path: None, // Initialize to None
+            current_file_start_instant: None,
+            current_file_size: 0,
+            status_callback: None,
+            on_segment_open: None,
+            on_segment_close: None,
         })
+    }
+
+    /// Sets a callback closure that will be called with current status information.
+    ///
+    /// The callback receives:
+    /// - `Option<&PathBuf>`: The current file path (None if no file is open)
+    /// - `u64`: Current file size in bytes
+    /// - `f64`: Current write rate in bytes per second
+    /// - `Option<u32>`: Current duration in milliseconds (None if no duration available)
+    pub fn set_status_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(Option<&PathBuf>, u64, f64, Option<u32>) + Send + 'static,
+    {
+        self.status_callback = Some(Box::new(callback));
+    }
+
+    /// Sets a callback closure that will be called when a new segment is opened.
+    ///
+    /// The callback receives:
+    /// - `&PathBuf`: Path to the file that was opened
+    /// - `u32`: File counter number (segment number)
+    pub fn set_on_segment_open<F>(&mut self, callback: F)
+    where
+        F: Fn(&PathBuf, u32) + Send + 'static,
+    {
+        self.on_segment_open = Some(Box::new(callback));
+    }
+
+    /// Sets a callback closure that will be called when a segment is closed.
+    ///
+    /// The callback receives:
+    /// - `&PathBuf`: Path to the file that was closed
+    /// - `u32`: File counter number (segment number)
+    /// - `u64`: Number of tags written to this segment
+    /// - `Option<u32>`: Duration of the segment in milliseconds (if available)
+    pub fn set_on_segment_close<F>(&mut self, callback: F)
+    where
+        F: Fn(&PathBuf, u32, u64, Option<u32>) + Send + 'static,
+    {
+        self.on_segment_close = Some(Box::new(callback));
+    }
+
+    /// Calculates the current write rate in bytes per second.
+    fn calculate_write_rate(&self) -> f64 {
+        if let Some(start_time) = self.current_file_start_instant {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                return self.current_file_size as f64 / elapsed;
+            }
+        }
+        0.0
+    }
+
+    /// Calculates the current duration of the file in milliseconds.
+    fn calculate_current_duration(&self) -> Option<u32> {
+        match (self.current_file_start_time, self.current_file_last_time) {
+            (Some(start), Some(last)) if last >= start => Some(last - start),
+            _ => None, // No duration available yet
+        }
+    }
+
+    /// Updates the file size and calls the status callback if set.
+    fn update_stats(&self) {
+        if let Some(callback) = &self.status_callback {
+            let rate = self.calculate_write_rate();
+            let duration = self.calculate_current_duration();
+            callback(
+                self.current_file_path.as_ref(),
+                self.current_file_size,
+                rate,
+                duration,
+            );
+        }
     }
 
     /// Consumes the stream and writes FLV data to one or more files.
@@ -117,12 +216,13 @@ impl FlvWriterTask {
     ) -> Result<(), WriterError> {
         let mut error: Option<Box<dyn Error + Send + Sync>> = None;
 
-        let mut _file_size = 0;
         while let Ok(result) = receiver.recv() {
             match result {
                 Ok(FlvData::Header(header)) => {
                     self.handle_header(header)?;
-                    _file_size = 11 + 4;
+                    self.current_file_size = 11 + 4; // Header + PreviousTagSize
+                    self.current_file_start_instant = Some(Instant::now());
+                    self.update_stats();
                 }
                 Ok(FlvData::Tag(tag)) => {
                     let tag_type = tag.tag_type;
@@ -139,7 +239,6 @@ impl FlvWriterTask {
                     let mut writer_opt = self.current_writer.take();
 
                     // Delegate the blocking write operation
-
                     let write_result = match &mut writer_opt {
                         Some(writer) => {
                             writer.write_tag(tag_type, data, timestamp_ms)?;
@@ -165,9 +264,10 @@ impl FlvWriterTask {
                             tracing::error!(error = ?e, "Tag analysis failed.");
                         }
                     }
-                    // current file size
 
-                    _file_size = self.analyzer.stats.file_size;
+                    // Update file size from analyzer stats and trigger the status callback
+                    self.current_file_size = self.analyzer.stats.file_size;
+                    self.update_stats();
 
                     // Log progress periodically
                     if current_total_count % 50000 == 0 {
@@ -254,13 +354,27 @@ impl FlvWriterTask {
 
         info!(segment= %file_num, path = %output_path.display(), "Opening: ");
 
-        // Perform blocking file creation and writer initialization
+        // Reset stats for new file
+        self.current_file_size = 0;
+        self.current_file_start_instant = Some(Instant::now());
 
+        // Perform blocking file creation and writer initialization
         let output_file = std::fs::File::create(&output_path)?;
         let buffered_writer = std::io::BufWriter::with_capacity(1024 * 1024, output_file);
         let new_writer = FlvWriter::with_header(buffered_writer, &header_clone)?;
 
         self.current_writer = Some(new_writer);
+
+        // Update stats after file creation
+        self.update_stats();
+
+        // Call segment open callback if set
+        if let Some(callback) = &self.on_segment_open {
+            if let Some(path) = &self.current_file_path {
+                callback(path, self.file_counter);
+            }
+        }
+
         Ok(())
     }
 
@@ -275,8 +389,6 @@ impl FlvWriterTask {
             let tags = self.current_file_tag_count;
             let file_num = self.file_counter;
 
-            // info!(tags, file_num, duration_ms = ?duration_ms, "Closing file segment (delegating to blocking task).");
-
             // Move the writer into the blocking task for closing
             writer.close()?; // Blocking close (flushes BufWriter)
 
@@ -287,6 +399,16 @@ impl FlvWriterTask {
                 duration_ms,
                 "Closed:"
             );
+
+            // Call segment close callback if set
+            if let Some(callback) = &self.on_segment_close {
+                if let Some(path) = &self.current_file_path {
+                    callback(path, file_num, tags, duration_ms);
+                }
+            }
+
+            // Final stats update before completing file
+            self.update_stats();
 
             let output_path = self.current_file_path.take().unwrap();
             match self.analyzer.build_stats() {
@@ -308,9 +430,36 @@ impl FlvWriterTask {
                 }
             }
 
+            // Reset file stats after closing
+            self.current_file_size = 0;
+            self.current_file_start_instant = None;
+
+            // Update status with no current file
+            self.update_stats();
+
             self.analyzer.reset();
         }
         Ok(())
+    }
+
+    /// Gets the current download path, or None if no file is active
+    pub fn current_path(&self) -> Option<&PathBuf> {
+        self.current_file_path.as_ref()
+    }
+
+    /// Gets the current file size in bytes
+    pub fn current_size(&self) -> u64 {
+        self.current_file_size
+    }
+
+    /// Gets the current write rate in bytes per second
+    pub fn write_rate(&self) -> f64 {
+        self.calculate_write_rate()
+    }
+
+    /// Gets the current duration in milliseconds, or None if not available
+    pub fn current_duration(&self) -> Option<u32> {
+        self.calculate_current_duration()
     }
 
     pub fn total_tags_written(&self) -> u64 {

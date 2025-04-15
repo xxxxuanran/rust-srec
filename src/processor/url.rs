@@ -2,16 +2,19 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv_fix::context::StreamerContext;
 use flv_fix::pipeline::{FlvPipeline, PipelineConfig};
-use flv_fix::writer_task::{FlvWriterTask, WriterError};
+use flv_fix::writer_task::FlvWriterTask;
 use futures::StreamExt;
+use indicatif::HumanBytes;
 use reqwest::Url;
 use siphon::FlvDownloader;
 use siphon::downloader::DownloaderConfig;
 use std::path::Path;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::utils::expand_filename_template;
+use crate::utils::progress::ProgressManager;
 
 /// Process a single URL with proxy support
 pub async fn process_url(
@@ -21,6 +24,7 @@ pub async fn process_url(
     download_config: DownloaderConfig,
     enable_processing: bool,
     name_template: Option<&str>,
+    pb_manager: &mut ProgressManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
 
@@ -54,6 +58,8 @@ pub async fn process_url(
 
     let downloader = FlvDownloader::with_config(download_config)?;
 
+    pb_manager.set_status(&format!("Processing URL: {}", url_str));
+
     if !enable_processing {
         // Raw mode: download without parsing through FlvDecoderStream
         info!(
@@ -70,10 +76,24 @@ pub async fn process_url(
 
         info!("Saving raw stream to {}", raw_output_path.display());
 
-        // Write the stream directly to the file
-        let bytes_written = write_raw_stream_to_file(raw_byte_stream, file).await?;
+        // Set up file progress bar
+        let filename = raw_output_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        pb_manager.add_file_progress(&filename);
+        pb_manager.set_status(&format!("Downloading {}", filename));
+
+        // Write the stream directly to the file with progress reporting
+        let bytes_written = write_raw_stream_to_file(raw_byte_stream, file, pb_manager).await?;
 
         let elapsed = start_time.elapsed();
+
+        pb_manager.finish(&format!(
+            "Downloaded {} in {:?}",
+            HumanBytes(bytes_written),
+            elapsed
+        ));
 
         info!(
             url = %url_str,
@@ -84,10 +104,7 @@ pub async fn process_url(
         );
     } else {
         // Processing mode: download and process through the pipeline
-        // info!(
-        //     url = %url_str,
-        //     "Starting to download and process FLV from URL (processing enabled)"
-        // );
+        pb_manager.set_status(&format!("Starting download from {}", url_str));
 
         // Download the FLV stream
         let input_stream = downloader.download(url_str).await?;
@@ -106,22 +123,40 @@ pub async fn process_url(
         });
 
         let output_dir = output_dir.to_path_buf();
+
+        // Add a file progress bar
+        pb_manager.add_file_progress(&base_name);
+
+        // Clone progress manager for the writer task
+        let progress_clone = pb_manager.clone();
+
         // Create writer task and run it
-        let writer_handle = tokio::task::spawn_blocking(|| {
+        let writer_handle = tokio::task::spawn_blocking(move || {
             let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
 
-            writer_task.run(receiver)?;
+            // Set up progress bar callbacks
+            progress_clone.setup_writer_task_callbacks(&mut writer_task);
 
-            Ok::<_, WriterError>((
-                writer_task.total_tags_written(),
-                writer_task.files_created(),
-            ))
+            let result = writer_task.run(receiver);
+
+            result.map(|_| {
+                (
+                    writer_task.total_tags_written(),
+                    writer_task.files_created(),
+                )
+            })
         });
 
         reader_handle.await?;
         let (total_tags_written, files_created) = writer_handle.await??;
 
         let elapsed = start_time.elapsed();
+
+        // Finish all progress bars
+        pb_manager.finish(&format!(
+            "Processed {} tags into {} files in {:?}",
+            total_tags_written, files_created, elapsed
+        ));
 
         info!(
             url = %url_str,
@@ -139,6 +174,7 @@ pub async fn process_url(
 async fn write_raw_stream_to_file(
     mut stream: siphon::RawByteStream,
     file: tokio::fs::File,
+    progress: &ProgressManager,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -146,16 +182,36 @@ async fn write_raw_stream_to_file(
     let mut writer = tokio::io::BufWriter::new(file);
     let mut total_bytes = 0u64;
 
+    // Update progress every 100ms at most
+    let mut last_update = Instant::now();
+
     // Process the stream and write bytes to file
     while let Some(result) = stream.next().await {
         match result {
             Ok(bytes) => {
                 writer.write_all(&bytes).await?;
                 total_bytes += bytes.len() as u64;
+
+                // Update the progress bar (but not too frequently)
+                let now = Instant::now();
+                if now.duration_since(last_update) > Duration::from_millis(100) {
+                    progress.update_main_progress(total_bytes);
+
+                    // Get the current file progress bar (if any)
+                    if let Some(file_pb) = progress.get_file_progress() {
+                        file_pb.set_position(total_bytes);
+                        file_pb.set_length(total_bytes);
+                    }
+
+                    last_update = now;
+                }
             }
             Err(e) => return Err(Box::new(e)),
         }
     }
+
+    // Final progress update
+    progress.update_main_progress(total_bytes);
 
     // Flush any remaining buffered data
     writer.flush().await?;
