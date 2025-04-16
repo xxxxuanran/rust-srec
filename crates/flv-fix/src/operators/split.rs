@@ -32,13 +32,10 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvUtil};
-use kanal;
-use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -97,7 +94,7 @@ impl SplitOperator {
         crc32fast::hash(data)
     }
 
-    // Split stream and reinject header+sequence data
+    // Split stream and re-inject header+sequence data
     fn split_stream(
         &mut self,
         output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
@@ -208,489 +205,242 @@ impl FlvProcessor for SplitOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use flv::tag::{FlvTag, FlvTagType};
-    use kanal;
+    use crate::test_utils::{
+        self, create_audio_sequence_header, create_audio_tag, create_test_header,
+        create_video_sequence_header, create_video_tag,
+    };
 
-    // Helper function to create a test context
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    // Helper function to create a FlvHeader for testing
-    fn create_test_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    // Helper function to create a basic tag for testing
-    fn create_basic_tag(tag_type: FlvTagType, timestamp: u32) -> FlvData {
-        let data = vec![0x17, 0x01, 0x00, 0x00, 0x00]; // Sample tag data
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type,
-            data: Bytes::from(data),
-        })
-    }
-
-    // Helper function to create a video sequence header tag
-    fn create_video_sequence_tag(
-        timestamp: u32,
-        sps_content: &[u8],
-        pps_content: &[u8],
-    ) -> FlvData {
-        // Format:
-        // 1 byte: first 4 bits = frame type (1 for keyframe), last 4 bits = codec id (7 for AVC)
-        // 1 byte: AVC packet type (0 for sequence header)
-        // 3 bytes: composition time
-        // 1 byte: version
-        // ... SPS/PPS data with length prefixes
-
-        let mut data = vec![
-            0x17, // frame type 1 (keyframe) + codec id 7 (AVC)
-            0x00, // AVC sequence header
-            0x00,
-            0x00,
-            0x00, // composition time
-            0x01, // version
-            // SPS fields
-            0x64,
-            0x00,
-            0x1F,
-            0xFF, // SPS parameter set stuff
-            0xE1, // 1 SPS
-            ((sps_content.len() >> 8) & 0xFF) as u8,
-            (sps_content.len() & 0xFF) as u8, // SPS length
-        ];
-
-        // Add SPS content
-        data.extend_from_slice(sps_content);
-
-        // Add number of PPS
-        data.push(0x01); // 1 PPS
-
-        // Add PPS length
-        data.push(((pps_content.len() >> 8) & 0xFF) as u8);
-        data.push((pps_content.len() & 0xFF) as u8);
-
-        // Add PPS content
-        data.extend_from_slice(pps_content);
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    // Helper function to create an audio sequence header tag
-    fn create_audio_sequence_tag(timestamp: u32, content: &[u8]) -> FlvData {
-        // Format:
-        // 1 byte: first 4 bits = audio format (10 for AAC), + other audio settings
-        // 1 byte: AAC packet type (0 for sequence header)
-        // ... AAC specific config
-
-        let mut data = vec![
-            0xAF, // Audio format 10 (AAC) + sample rate 3 (44kHz) + sample size 1 (16-bit) + stereo
-            0x00, // AAC sequence header
-            0x12, 0x10, // AAC specific config
-        ];
-
-        // Add sequence specific config
-        data.extend_from_slice(content);
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_normal_flow_no_changes() {
-        let context = create_test_context();
+    #[test]
+    fn test_video_codec_change_detection() {
+        let context = test_utils::create_test_context();
         let mut operator = SplitOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a simple stream with no parameter changes
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-
-        // Send video sequence header
-        let sps = [0x67, 0x42, 0x00, 0x2A, 0x96, 0x35, 0x40]; // Sample SPS
-        let pps = [0x68, 0xCE, 0x38, 0x80]; // Sample PPS
-        input_tx
-            .send(Ok(create_video_sequence_tag(0, &sps, &pps)))
-            .await
+        // Add a header and first video sequence header (version 1)
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_sequence_header(1), &mut output_fn)
             .unwrap();
 
-        // Send audio sequence header
-        let aac_config = [0x12, 0x10]; // Sample AAC config
-        input_tx
-            .send(Ok(create_audio_sequence_tag(0, &aac_config)))
-            .await
-            .unwrap();
-
-        // Send regular tags
-        for i in 0..5 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i)))
-                .await
-                .unwrap();
-        }
-
-        // Close the input
-        drop(input_tx);
-
-        // Should receive all 8 items without any extra insertions
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        assert_eq!(received_items.len(), 8);
-    }
-
-    #[tokio::test]
-    async fn test_video_parameter_change() {
-        let context = create_test_context();
-        let mut operator = SplitOperator::new(context);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send initial stream setup
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-
-        // First video sequence header
-        let sps1 = [0x67, 0x42, 0x00, 0x2A, 0x96, 0x35, 0x40]; // Sample SPS
-        let pps1 = [0x68, 0xCE, 0x38, 0x80]; // Sample PPS
-        input_tx
-            .send(Ok(create_video_sequence_tag(0, &sps1, &pps1)))
-            .await
-            .unwrap();
-
-        // Audio sequence header
-        let aac_config1 = [0x12, 0x10]; // Sample AAC config
-        input_tx
-            .send(Ok(create_audio_sequence_tag(0, &aac_config1)))
-            .await
-            .unwrap();
-
-        // Send some regular tags
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i + 1)))
-                .await
-                .unwrap();
-        }
-
-        // Send a new video sequence header with different parameters
-        let sps2 = [0x67, 0x42, 0x00, 0x2A, 0x96, 0x35, 0x50]; // Changed SPS
-        let pps2 = [0x68, 0xCE, 0x38, 0x80]; // Same PPS
-        input_tx
-            .send(Ok(create_video_sequence_tag(100, &sps2, &pps2)))
-            .await
-            .unwrap();
-
-        // Send more regular tags - this should trigger stream split
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i + 100)))
-                .await
-                .unwrap();
-        }
-
-        // Close the input
-        drop(input_tx);
-
-        // Collect all received items
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // We should have:
-        // 1. Original header
-        // 2. First video sequence header
-        // 3. Audio sequence header
-        // 4-6. Three regular video tags
-        // 7. New video sequence header
-        // 8-11. Re-inserted header and metadata (header, video seq, audio seq)
-        // 11-13. Remaining regular tags
-        // Total: 13 items
-
-        // Print each tag with its position and type
-        for (i, item) in received_items.iter().enumerate() {
-            match item {
-                FlvData::Header(_) => println!("Item {}: Header", i),
-                FlvData::Tag(tag) => println!(
-                    "Item {}: Tag type {:?}, timestamp: {}ms",
-                    i, tag.tag_type, tag.timestamp_ms
-                ),
-                FlvData::EndOfSequence(_) => println!("Item {}: End of sequence", i),
-            }
-        }
-
-        assert_eq!(
-            received_items.len(),
-            13,
-            "Expected stream split to add additional items"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_audio_parameter_change() {
-        let context = create_test_context();
-        let mut operator = SplitOperator::new(context);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send initial stream setup
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-
-        // Video sequence header
-        let sps = [0x67, 0x42, 0x00, 0x2A, 0x96, 0x35, 0x40]; // Sample SPS
-        let pps = [0x68, 0xCE, 0x38, 0x80]; // Sample PPS
-        input_tx
-            .send(Ok(create_video_sequence_tag(0, &sps, &pps)))
-            .await
-            .unwrap();
-
-        // First audio sequence header
-        let aac_config1 = [0x12, 0x10]; // Sample AAC config
-        input_tx
-            .send(Ok(create_audio_sequence_tag(0, &aac_config1)))
-            .await
-            .unwrap();
-
-        // Send some regular tags
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i)))
-                .await
-                .unwrap();
-        }
-
-        // Send a new audio sequence header with different parameters
-        let aac_config2 = [0x13, 0x90]; // Changed AAC config
-        input_tx
-            .send(Ok(create_audio_sequence_tag(100, &aac_config2)))
-            .await
-            .unwrap();
-
-        // Send more regular tags - this should trigger stream split
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i + 100)))
-                .await
-                .unwrap();
-        }
-
-        // Close the input
-        drop(input_tx);
-
-        // Collect all received items
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // We should have more than the original number of items due to the stream split
-        assert!(
-            received_items.len() > 10,
-            "Expected stream split to add additional items"
-        );
-    }
-
-    // Helper function to create regular audio tag
-    fn create_regular_audio_tag(timestamp: u32) -> FlvData {
-        let data = vec![0xAF, 0x01, 0x21, 0x10, 0x04]; // Sample AAC audio frame
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_interleaved_parameter_changes() {
-        let context = create_test_context();
-        let mut operator = SplitOperator::new(context);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the operator in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send header
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-
-        // Send initial codec headers
-        let sps1 = [0x67, 0x42, 0x00, 0x2A, 0x96, 0x35, 0x40];
-        let pps1 = [0x68, 0xCE, 0x38, 0x80];
-        input_tx
-            .send(Ok(create_video_sequence_tag(0, &sps1, &pps1)))
-            .await
-            .unwrap();
-
-        let aac_config1 = [0x12, 0x10];
-        input_tx
-            .send(Ok(create_audio_sequence_tag(0, &aac_config1)))
-            .await
-            .unwrap();
-
-        // Send some regular content
+        // Add some content tags
         for i in 1..5 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i * 33)))
-                .await
-                .unwrap();
-            input_tx
-                .send(Ok(create_regular_audio_tag(i * 33 + 5)))
-                .await
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Edge case: send video sequence change immediately followed by audio sequence change
-        // This tests handling of multiple parameter changes without regular tags in between
-        let sps2 = [0x67, 0x42, 0x00, 0x2B, 0x96, 0x35, 0x41];
-        let pps2 = [0x68, 0xCE, 0x38, 0x81];
-        input_tx
-            .send(Ok(create_video_sequence_tag(200, &sps2, &pps2)))
-            .await
+        // Add a different video sequence header (version 2) - should trigger a split
+        operator
+            .process(create_video_sequence_header(2), &mut output_fn)
             .unwrap();
 
-        // Send audio parameter change immediately after
-        let aac_config2 = [0x13, 0x90];
-        input_tx
-            .send(Ok(create_audio_sequence_tag(200, &aac_config2)))
-            .await
+        // Add more content tags
+        for i in 5..10 {
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
+                .unwrap();
+        }
+
+        // The header count indicates how many splits occurred
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        // Should have 2 headers: initial + 1 after codec change
+        assert_eq!(
+            header_count, 2,
+            "Should detect video codec change and inject new header"
+        );
+    }
+
+    #[test]
+    fn test_audio_codec_change_detection() {
+        let context = test_utils::create_test_context();
+        let mut operator = SplitOperator::new(context);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Add a header and first audio sequence header
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_sequence_header(1), &mut output_fn)
             .unwrap();
 
-        // Send more regular content
-        for i in 6..10 {
-            input_tx
-                .send(Ok(create_basic_tag(FlvTagType::Video, i * 33)))
-                .await
-                .unwrap();
-            input_tx
-                .send(Ok(create_regular_audio_tag(i * 33 + 5)))
-                .await
+        // Add some content tags
+        for i in 1..5 {
+            operator
+                .process(create_audio_tag(i * 100), &mut output_fn)
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
+        // Add a different audio sequence header - should trigger a split
+        operator
+            .process(create_audio_sequence_header(2), &mut output_fn)
+            .unwrap();
 
-        // Collect all received items
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
+        // Add more content tags
+        for i in 5..10 {
+            operator
+                .process(create_audio_tag(i * 100), &mut output_fn)
+                .unwrap();
         }
 
-        // Look for split points in the output
-        let mut split_detected = false;
-        let mut stream_contents = Vec::new();
-
-        // Log the content for analysis
-        for (i, item) in received_items.iter().enumerate() {
-            match item {
-                FlvData::Header(_) => {
-                    stream_contents.push(format!("Item {}: Header", i));
-                }
-                FlvData::Tag(tag) => {
-                    if tag.is_video_sequence_header() {
-                        stream_contents.push(format!(
-                            "Item {}: Video Sequence Header ({}ms)",
-                            i, tag.timestamp_ms
-                        ));
-                    } else if tag.is_audio_sequence_header() {
-                        stream_contents.push(format!(
-                            "Item {}: Audio Sequence Header ({}ms)",
-                            i, tag.timestamp_ms
-                        ));
-                    } else {
-                        stream_contents.push(format!(
-                            "Item {}: {:?} ({}ms)",
-                            i, tag.tag_type, tag.timestamp_ms
-                        ));
-                    }
-                }
-                _ => {}
-            }
-
-            // Detect split pattern: header followed by sequence headers
-            if i >= 2
-                && matches!(received_items[i - 2], FlvData::Header(_))
-                && matches!(received_items[i-1], FlvData::Tag(ref t) if t.is_video_sequence_header() || t.is_audio_sequence_header())
-                && matches!(received_items[i], FlvData::Tag(ref t) if t.is_video_sequence_header() || t.is_audio_sequence_header())
-            {
-                split_detected = true;
-            }
-        }
-
-        // Print the stream for analysis
-        for line in &stream_contents {
-            println!("{}", line);
-        }
-
-        // The operator should have triggered a split and re-injected headers
-        assert!(
-            split_detected,
-            "Expected to detect at least one stream split"
-        );
-
-        // Verify presence of both video and audio parameter changes
-        let video_changes = received_items
+        // The header count indicates how many splits occurred
+        let header_count = output_items
             .iter()
-            .filter_map(|item| match item {
-                FlvData::Tag(tag) if tag.is_video_sequence_header() => Some(tag.timestamp_ms),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
 
-        let audio_changes = received_items
+        // Should have 2 headers: initial + 1 after codec change
+        assert_eq!(
+            header_count, 2,
+            "Should detect audio codec change and inject new header"
+        );
+    }
+
+    #[test]
+    fn test_no_codec_change() {
+        let context = test_utils::create_test_context();
+        let mut operator = SplitOperator::new(context);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Add a header and codec headers
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_sequence_header(1), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_sequence_header(1), &mut output_fn)
+            .unwrap();
+
+        // Add some content tags
+        for i in 1..5 {
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(i * 100), &mut output_fn)
+                .unwrap();
+        }
+
+        // Add identical codec headers again - should NOT trigger a split
+        operator
+            .process(create_video_sequence_header(1), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_sequence_header(1), &mut output_fn)
+            .unwrap();
+
+        // Add more content tags
+        for i in 5..10 {
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(i * 100), &mut output_fn)
+                .unwrap();
+        }
+
+        // The header count indicates how many splits occurred
+        let header_count = output_items
             .iter()
-            .filter_map(|item| match item {
-                FlvData::Tag(tag) if tag.is_audio_sequence_header() => Some(tag.timestamp_ms),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
 
-        assert!(
-            video_changes.len() > 1,
-            "Expected multiple video sequence headers"
+        // Should have only 1 header (the initial one)
+        assert_eq!(
+            header_count, 1,
+            "Should not split when codec doesn't change"
         );
-        assert!(
-            audio_changes.len() > 1,
-            "Expected multiple audio sequence headers"
-        );
+    }
 
-        println!("Video sequence headers at timestamps: {:?}", video_changes);
-        println!("Audio sequence headers at timestamps: {:?}", audio_changes);
+    #[test]
+    fn test_multiple_codec_changes() {
+        let context = test_utils::create_test_context();
+        let mut operator = SplitOperator::new(context);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // First segment
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_sequence_header(1), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_sequence_header(1), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(100, true), &mut output_fn)
+            .unwrap();
+
+        // Second segment (video codec change)
+        operator
+            .process(create_video_sequence_header(2), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(200, true), &mut output_fn)
+            .unwrap();
+
+        // Third segment (audio codec change)
+        operator
+            .process(create_audio_sequence_header(2), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(300), &mut output_fn)
+            .unwrap();
+
+        // Fourth segment (both codecs change)
+        operator
+            .process(create_video_sequence_header(3), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_sequence_header(3), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(400, true), &mut output_fn)
+            .unwrap();
+
+        // The header count indicates how many segments we have
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        // Should have 4 headers: initial + 3 after codec changes
+        assert_eq!(
+            header_count, 4,
+            "Should detect all codec changes and inject new headers"
+        );
     }
 }

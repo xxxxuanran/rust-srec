@@ -31,12 +31,9 @@
 //! when insertion is needed.
 
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
-use kanal;
-use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -106,160 +103,60 @@ impl FlvProcessor for HeaderCheckOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use flv::tag::{FlvTag, FlvTagType};
+    use crate::test_utils::{create_test_context, create_test_header, create_video_tag};
 
-    // Helper function to create a test context
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    // Helper function to create a FlvHeader for testing
-    fn create_test_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    // Helper function to create a FlvTag for testing
-    fn create_test_tag(tag_type: FlvTagType, timestamp: u32) -> FlvData {
-        let data = vec![0u8; 10]; // Sample tag data
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_with_header_present() {
+    #[test]
+    fn test_with_header_present() {
         let context = create_test_context();
         let mut operator = HeaderCheckOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::unbounded_async();
-        let (output_tx, output_rx) = kanal::unbounded_async();
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a header followed by some tags
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        // Process a header followed by some tags
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..5 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
-
         // Should receive all 6 items (header + 5 tags)
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-            if received_items.len() == 6 {
-                // Got all expected items
-                break;
-            }
-        }
-
-        assert_eq!(received_items.len(), 6);
+        assert_eq!(output_items.len(), 6);
 
         // First item should be a header
-        assert!(matches!(received_items[0], FlvData::Header(_)));
+        assert!(matches!(output_items[0], FlvData::Header(_)));
     }
 
-    #[tokio::test]
-    async fn test_without_header() {
+    #[test]
+    fn test_without_header() {
         let context = create_test_context();
         let mut operator = HeaderCheckOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::unbounded_async();
-        let (output_tx, output_rx) = kanal::unbounded_async();
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send tags without a header
         for i in 0..5 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i * 100, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
-
-        // Close the input
-        drop(input_tx);
 
         // Should receive 6 items (default header + 5 tags)
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-            if received_items.len() == 6 {
-                // Got all expected items
-                break;
-            }
-        }
-
-        assert_eq!(received_items.len(), 6);
+        assert_eq!(output_items.len(), 6);
 
         // First item should be a header
-        assert!(matches!(received_items[0], FlvData::Header(_)));
-    }
-
-    #[tokio::test]
-    async fn test_with_error() {
-        let context = create_test_context();
-        let mut operator = HeaderCheckOperator::new(context);
-
-        let (input_tx, input_rx) = kanal::unbounded_async();
-        let (output_tx, output_rx) = kanal::unbounded_async();
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send an error as the first item
-        input_tx
-            .send(Err(FlvError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Test error",
-            ))))
-            .await
-            .unwrap();
-
-        // Send some valid data after the error
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
-                .unwrap();
-        }
-
-        // Close the input
-        drop(input_tx);
-
-        // Should receive 4 items (1 error + 3 tags)
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item);
-            if received_items.len() == 4 {
-                // Got all expected items
-                break;
-            }
-        }
-
-        assert_eq!(received_items.len(), 4);
-
-        // First item should be an error
-        assert!(received_items[0].is_err());
-
-        // No header should be inserted after an error
-        assert!(matches!(received_items[1], Ok(FlvData::Tag(_))));
+        assert!(matches!(output_items[0], FlvData::Header(_)));
     }
 }

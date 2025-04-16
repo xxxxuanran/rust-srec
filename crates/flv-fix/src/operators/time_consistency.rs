@@ -38,12 +38,10 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::{FlvOperator, FlvProcessor};
+use crate::operators::FlvProcessor;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::FlvUtil;
-use kanal::AsyncReceiver as Receiver;
-use kanal::AsyncSender as Sender;
 use std::cmp::max;
 use std::sync::Arc;
 use tracing::{debug, trace};
@@ -264,264 +262,235 @@ impl FlvProcessor for TimeConsistencyOperator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bytes::Bytes;
-    use flv::{
-        header::FlvHeader,
-        tag::{FlvTag, FlvTagType},
+    use crate::test_utils::{
+        create_audio_tag, create_test_context, create_test_header, create_video_tag,
     };
-    use kanal;
 
-    // Helper functions (similar to those in SplitOperator for consistency)
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
+    use super::*;
 
-    fn create_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    fn create_video_tag(timestamp: u32) -> FlvData {
-        let data = vec![0x17, 0x01, 0x00, 0x00, 0x00];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_audio_tag(timestamp: u32) -> FlvData {
-        let data = vec![0xAF, 0x01, 0x21, 0x10, 0x04];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_continuous_mode() {
-        let context = create_test_context();
-        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // First segment
-        input_tx.send(Ok(create_header())).await.unwrap();
-
-        // Send some tags with increasing timestamps
-        for i in 0..5 {
-            input_tx.send(Ok(create_video_tag(i * 100))).await.unwrap();
-        }
-
-        // Last timestamp in first segment: 400ms
-
-        // Create a split (send another header)
-        input_tx.send(Ok(create_header())).await.unwrap();
-
-        // Second segment starts with timestamp 0 again
-        for i in 0..5 {
-            input_tx.send(Ok(create_video_tag(i * 100))).await.unwrap();
-        }
-
-        // Close input
-        drop(input_tx);
-
-        // Collect results and verify timestamps
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
-
-        // In continuous mode, second segment timestamps should continue from 400ms
-        // So instead of [0, 100, 200, 300, 400] we should see approximately [401, 501, 601, 701, 801]
-
-        for (i, item) in results.iter().enumerate() {
-            if let FlvData::Tag(tag) = item {
-                println!("Tag {}: timestamp = {}ms", i, tag.timestamp_ms);
-            } else if let FlvData::Header(_) = item {
-                println!("Tag {}: FLV header", i);
-            }
-        }
-
-        // Check specific timestamps in second segment
-        // Headers at index 0 and 6
-        // First segment tags at index 1-5
-        // Second segment adjusted tags at index 7-11
-        if let FlvData::Tag(tag) = &results[7] {
-            assert!(
-                tag.timestamp_ms >= 400,
-                "First tag after split should have timestamp > 400ms"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_reset_mode() {
+    #[test]
+    fn test_normal_flow() {
         let context = create_test_context();
         let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Process a header followed by some tags
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(0, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(10), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(20, false), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(30), &mut output_fn)
+            .unwrap();
 
-        // First segment
-        input_tx.send(Ok(create_header())).await.unwrap();
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Send some tags with increasing timestamps
-        for i in 0..5 {
-            input_tx
-                .send(Ok(create_video_tag(i * 100 + 50)))
-                .await
-                .unwrap();
-        }
+        // Validate tags have correct timestamps
+        assert_eq!(output_items.len(), 5);
 
-        // Create a split (send another header)
-        input_tx.send(Ok(create_header())).await.unwrap();
+        // Extract tags and verify timestamps
+        let timestamps: Vec<u32> = output_items
+            .iter()
+            .filter_map(|item| {
+                if let FlvData::Tag(tag) = item {
+                    Some(tag.timestamp_ms)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        // Second segment with timestamps starting at 80ms (non-zero to verify reset)
-        for i in 0..5 {
-            input_tx
-                .send(Ok(create_video_tag(i * 100 + 80)))
-                .await
-                .unwrap();
-        }
-
-        // Close input
-        drop(input_tx);
-
-        // Collect results and verify timestamps
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
-
-        // In reset mode, second segment timestamps should start near zero
-
-        for (i, item) in results.iter().enumerate() {
-            if let FlvData::Tag(tag) = item {
-                println!("Tag {}: timestamp = {}ms", i, tag.timestamp_ms);
-            } else if let FlvData::Header(_) = item {
-                println!("Tag {}: FLV header", i);
-            }
-        }
-
-        // First timestamp in second segment should be reset or near zero
-        if let FlvData::Tag(tag) = &results[7] {
-            assert!(
-                tag.timestamp_ms < 10,
-                "First tag after split should be near 0ms in reset mode"
-            );
-        }
+        // Original timestamps should be preserved in normal flow
+        assert_eq!(timestamps, vec![0, 10, 20, 30]);
     }
 
-    #[tokio::test]
-    async fn test_multiple_splits() {
+    #[test]
+    fn test_timestamp_reset() {
+        let context = create_test_context();
+        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Process a header followed by some tags with increasing timestamps
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1000, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(1010), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1020, false), &mut output_fn)
+            .unwrap();
+
+        // Send another header (should reset timebase)
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(500, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(510), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(520, false), &mut output_fn)
+            .unwrap();
+
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
+
+        // Extract tags and verify timestamps
+        let timestamps: Vec<u32> = output_items
+            .iter()
+            .filter_map(|item| {
+                if let FlvData::Tag(tag) = item {
+                    Some(tag.timestamp_ms)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // With Reset mode, second segment should start from its own timestamp without adjustment
+        assert_eq!(timestamps, vec![0, 10, 20, 0, 10, 20]);
+    }
+
+    #[test]
+    fn test_timestamp_continue_mode() {
         let context = create_test_context();
         let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Continuous);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Process a header followed by some tags with increasing timestamps
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1000, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(1010), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1020, false), &mut output_fn)
+            .unwrap();
 
-        // First segment
-        input_tx.send(Ok(create_header())).await.unwrap();
-        for i in 0..3 {
-            input_tx.send(Ok(create_video_tag(i * 100))).await.unwrap();
-        }
-        // Last timestamp in first segment: 200ms
+        // Send another header (should continue timing)
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(500, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(510), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(520, false), &mut output_fn)
+            .unwrap();
 
-        // Second segment
-        input_tx.send(Ok(create_header())).await.unwrap();
-        for i in 0..3 {
-            input_tx.send(Ok(create_video_tag(i * 100))).await.unwrap();
-        }
-        // Last timestamp in second segment: 200ms (before adjustment)
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Third segment
-        input_tx.send(Ok(create_header())).await.unwrap();
-        for i in 0..3 {
-            input_tx.send(Ok(create_video_tag(i * 100))).await.unwrap();
-        }
-        // Last timestamp in third segment: 200ms (before adjustment)
-
-        // Close input
-        drop(input_tx);
-
-        // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
-
-        // Extract video tags by segment for comparison
-        let mut segments: Vec<Vec<u32>> = Vec::new();
-        let mut current_segment: Vec<u32> = Vec::new();
-
-        for item in &results {
-            match item {
-                FlvData::Header(_) => {
-                    if !current_segment.is_empty() {
-                        segments.push(current_segment);
-                        current_segment = Vec::new();
-                    }
+        // Extract tags and verify timestamps
+        let timestamps: Vec<u32> = output_items
+            .iter()
+            .filter_map(|item| {
+                if let FlvData::Tag(tag) = item {
+                    Some(tag.timestamp_ms)
+                } else {
+                    None
                 }
-                FlvData::Tag(tag) if tag.tag_type == FlvTagType::Video => {
-                    current_segment.push(tag.timestamp_ms);
+            })
+            .collect();
+
+        // With Continue mode, second segment should continue from last segment's max timestamp
+        // 1020 (last timestamp of first segment) + 500 (offset of first tag in second segment) = 1520
+        // Then each tag follows with 10ms increments
+        assert_eq!(timestamps, vec![1000, 1010, 1020, 1520, 1530, 1540]);
+    }
+
+    #[test]
+    fn test_decreasing_timestamp_handling() {
+        let context = create_test_context();
+        let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Process tags with non-monotonic timestamps (decreasing)
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1000, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(1010), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(1020, false), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(990), &mut output_fn)
+            .unwrap(); // Decreasing timestamp
+        operator
+            .process(create_video_tag(1030, false), &mut output_fn)
+            .unwrap();
+
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
+
+        // Extract tags and verify timestamps
+        let timestamps: Vec<u32> = output_items
+            .iter()
+            .filter_map(|item| {
+                if let FlvData::Tag(tag) = item {
+                    Some(tag.timestamp_ms)
+                } else {
+                    None
                 }
-                _ => {}
-            }
-        }
+            })
+            .collect();
 
-        if !current_segment.is_empty() {
-            segments.push(current_segment);
-        }
-
-        // Display segments for analysis
-        for (i, segment) in segments.iter().enumerate() {
-            println!("Segment {}: {:?}", i, segment);
-        }
-
-        // Verify timestamp continuity
-        assert_eq!(segments.len(), 3, "Should have 3 segments");
-
-        // First segment should start near 0
-        assert!(segments[0][0] < 10, "First segment should start near 0");
-
-        // Second segment should start after the end of first segment
+        // The decreasing timestamp should be adjusted to maintain monotonicity
+        // 990 should be adjusted to at least 1020 or higher
         assert!(
-            segments[1][1] > segments[0][segments[0].len() - 1],
-            "Second segment should continue after first segment"
-        );
-
-        // Third segment should start after the end of second segment
-        assert!(
-            segments[2][1] > segments[1][segments[1].len() - 1],
-            "Third segment should continue after second segment"
-        );
-
-        // Check expected offsets (assuming 200ms per segment)
-        assert_eq!(segments[0], vec![0, 100, 200], "First segment timestamps");
-        assert!(
-            segments[1][0] >= 200,
-            "Second segment should start at or after 200ms"
-        );
-        assert!(
-            segments[2][0] >= 400,
-            "Third segment should start at or after 400ms"
+            timestamps[3] >= timestamps[2],
+            "Timestamps should be monotonically increasing"
         );
     }
 }

@@ -34,10 +34,8 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
-use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -70,11 +68,54 @@ impl DefragmentOperator {
         }
     }
 
+    // The minimum number of tags required to consider a segment valid.
     const MIN_TAGS_NUM: usize = 10;
 
+    // Resets the operator state, clearing the buffer and stopping gathering mode.
     fn reset(&mut self) {
         self.is_gathering = false;
         self.buffer.clear();
+    }
+
+    // Handle a new header detection
+    fn handle_new_header(&mut self) {
+        if !self.buffer.is_empty() {
+            warn!(
+                "{} Discarded {} items, total size: {}",
+                self.context.name,
+                self.buffer.len(),
+                self.buffer.iter().map(|d| d.size()).sum::<usize>()
+            );
+            self.reset();
+        }
+        self.is_gathering = true;
+        debug!("{} Start gathering...", self.context.name);
+    }
+
+    // Emit all buffered items and reset the buffer
+    fn emit_buffer(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        debug!(
+            "{} Gathered {} items, total size: {}",
+            self.context.name,
+            self.buffer.len(),
+            self.buffer.iter().map(|d| d.size()).sum::<usize>()
+        );
+
+        // Emit all buffered items
+        for tag in self.buffer.drain(..) {
+            output(tag)?;
+        }
+
+        self.is_gathering = false;
+        debug!(
+            "{} Not a fragmented sequence, stopped checking...",
+            self.context.name
+        );
+
+        Ok(())
     }
 }
 
@@ -84,43 +125,17 @@ impl FlvProcessor for DefragmentOperator {
         input: FlvData,
         output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
     ) -> Result<(), FlvError> {
-        if matches!(input, FlvData::Header(_)) {
-            if !self.buffer.is_empty() {
-                warn!(
-                    "{} Discarded {} items, total size: {}",
-                    self.context.name,
-                    self.buffer.len(),
-                    self.buffer.iter().map(|d| d.size()).sum::<usize>(),
-                );
-                self.buffer.clear();
-            }
-            self.is_gathering = true;
-            debug!("{} Start gathering...", self.context.name);
+        // Handle new header detection
+        if input.is_header() {
+            self.handle_new_header();
         }
 
         if self.is_gathering {
             self.buffer.push(input);
 
+            // Check if we've gathered enough tags
             if self.buffer.len() >= Self::MIN_TAGS_NUM {
-                debug!(
-                    "{} Gathered {} items, total size: {}",
-                    self.context.name,
-                    self.buffer.len(),
-                    self.buffer.iter().map(|d| d.size()).sum::<usize>(),
-                );
-
-                // Emit all buffered items
-                for tag in self.buffer.drain(..) {
-                    output(tag)?;
-                }
-
-                self.is_gathering = false;
-                debug!(
-                    "{} Not a fragmented sequence, stopped checking...",
-                    self.context.name
-                );
-                // Reset buffer for next sequence
-                self.buffer.clear();
+                self.emit_buffer(output)?;
             }
         } else {
             // Not gathering, emit directly
@@ -137,17 +152,14 @@ impl FlvProcessor for DefragmentOperator {
         // Handle remaining data at end of stream
         if !self.buffer.is_empty() {
             if self.buffer.len() >= Self::MIN_TAGS_NUM {
-                // If we have enough items, consider it valid
-                for tag in self.buffer.drain(..) {
-                    output(tag)?;
-                }
+                self.emit_buffer(output)?;
             } else {
-                // Not enough data, discard as fragmented
                 warn!(
                     "{} End of stream with only {} items in buffer, discarding",
                     self.context.name,
-                    self.buffer.len(),
+                    self.buffer.len()
                 );
+                self.reset();
             }
         }
         Ok(())
@@ -161,241 +173,136 @@ impl FlvProcessor for DefragmentOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use flv::{
-        data::FlvData,
-        header::FlvHeader,
-        tag::{FlvTag, FlvTagType},
-    };
-    use kanal;
-    use std::time::Duration;
+    use crate::test_utils::{self, create_video_tag};
 
-    // Helper function to create a test context
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    // Helper function to create a FlvHeader for testing
-    fn create_test_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    // Helper function to create a FlvTag for testing
-    fn create_test_tag(tag_type: FlvTagType, timestamp: u32) -> FlvData {
-        let data = vec![0u8; 10]; // Sample tag data
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_normal_flow_with_enough_tags() {
-        let context = create_test_context();
+    #[test]
+    fn test_normal_flow_with_enough_tags() {
+        let context = test_utils::create_test_context();
         let mut operator = DefragmentOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a header followed by enough tags to trigger emission
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        // Process a header followed by enough tags
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..11 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Should receive all 12 items (header + 11 tags)
-        let mut count = 0;
-        while let Ok(data) = output_rx.recv().await {
-            count += 1;
-        }
-
-        assert_eq!(count, 12);
+        // Should emit all 12 items (header + 11 tags)
+        assert_eq!(output_items.len(), 12);
     }
 
-    #[tokio::test]
-    async fn test_header_reset() {
-        let context = create_test_context();
+    #[test]
+    fn test_header_reset() {
+        let context = test_utils::create_test_context();
         let mut operator = DefragmentOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send a header followed by some tags (but not enough to emit)
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..5 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
         // Send another header (should discard previous tags)
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..11 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Send regular tag that should be emitted immediately
-        input_tx
-            .send(Ok(create_test_tag(FlvTagType::Video, 100)))
-            .await
+        // Send a regular tag after gathering enough
+        operator
+            .process(create_video_tag(100, true), &mut output_fn)
             .unwrap();
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Should receive 13 items (header + 11 tags from second batch + 1 regular tag)
-        let mut count = 0;
-        while let Ok(_) = output_rx.recv().await {
-            count += 1;
-        }
-
-        assert_eq!(count, 13);
+        // Should emit 13 items (header + 11 tags from second batch + 1 regular tag)
+        assert_eq!(output_items.len(), 13);
     }
 
-    #[tokio::test]
-    async fn test_error_propagation() {
-        let context = create_test_context();
+    #[test]
+    fn test_end_of_stream_with_enough_tags() {
+        let context = test_utils::create_test_context();
         let mut operator = DefragmentOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send some valid data
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        for i in 0..3 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
-                .unwrap();
-        }
-
-        // Send an error
-        input_tx
-            .send(Err(FlvError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Test error",
-            ))))
-            .await
-            .unwrap();
-
-        // Send more valid data
-        for i in 4..7 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
-                .unwrap();
-        }
-
-        // Close the input
-        drop(input_tx);
-
-        // Collect the results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result);
-        }
-
-        // Should have at least one error
-        let error_count = results.iter().filter(|r| r.is_err()).count();
-        assert_eq!(error_count, 1);
-    }
-
-    #[tokio::test]
-    async fn test_end_of_stream_with_enough_tags() {
-        let context = create_test_context();
-        let mut operator = DefragmentOperator::new(context);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send a header followed by exactly MIN_TAGS_NUM tags
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..10 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing (should emit buffer as it has enough tags)
+        operator.finish(&mut output_fn).unwrap();
 
         // Should receive all 11 items (header + 10 tags)
-        let mut count = 0;
-        while let Ok(_) = output_rx.recv().await {
-            count += 1;
-        }
-
-        assert_eq!(count, 11);
+        assert_eq!(output_items.len(), 11);
     }
 
-    #[tokio::test]
-    async fn test_end_of_stream_with_insufficient_tags() {
-        let context = create_test_context();
+    #[test]
+    fn test_end_of_stream_with_insufficient_tags() {
+        let context = test_utils::create_test_context();
         let mut operator = DefragmentOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Start the process in a separate task
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send a header followed by fewer than MIN_TAGS_NUM tags
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
         for i in 0..5 {
-            input_tx
-                .send(Ok(create_test_tag(FlvTagType::Video, i)))
-                .await
+            operator
+                .process(create_video_tag(i, i % 3 == 0), &mut output_fn)
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing (should discard buffer as it doesn't have enough tags)
+        operator.finish(&mut output_fn).unwrap();
 
-        // All items should be discarded
-        let mut count = 0;
-        let timeout = tokio::time::timeout(Duration::from_millis(100), async {
-            while let Ok(_) = output_rx.recv().await {
-                count += 1;
-            }
-        })
-        .await;
-
-        assert!(timeout.is_ok());
-        assert_eq!(count, 0);
+        // No items should be emitted
+        assert_eq!(output_items.len(), 0);
     }
 }

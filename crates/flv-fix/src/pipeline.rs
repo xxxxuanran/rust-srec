@@ -25,17 +25,14 @@ use crate::context::StreamerContext;
 use crate::operators::limit::LimitConfig;
 use crate::operators::script_filler::ScriptFillerConfig;
 use crate::operators::{
-    ContinuityMode, DefragmentOperator, FlvOperator, GopSortOperator, HeaderCheckOperator,
-    LimitOperator, NFlvPipeline, RepairStrategy, ScriptFilterOperator,
-    ScriptKeyframesFillerOperator, SplitOperator, TimeConsistencyOperator, TimingRepairConfig,
-    TimingRepairOperator,
+    ContinuityMode, DefragmentOperator, GopSortOperator, HeaderCheckOperator, LimitOperator,
+    NFlvPipeline, RepairStrategy, ScriptFilterOperator, ScriptKeyframesFillerOperator,
+    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator,
 };
-use flv::data::FlvData;
 use flv::error::FlvError;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 
 /// Type alias for a boxed stream of FLV data with error handling
 pub type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, FlvError>> + Send>>;
@@ -108,8 +105,8 @@ impl FlvPipeline {
         let context = Arc::clone(&self.context);
         let config = self.config.clone();
 
-        let mut defrag_operator = DefragmentOperator::new(context.clone());
-        let mut header_check_operator = HeaderCheckOperator::new(context.clone());
+        let defrag_operator = DefragmentOperator::new(context.clone());
+        let header_check_operator = HeaderCheckOperator::new(context.clone());
         let limit_config = LimitConfig {
             max_size_bytes: if config.file_size_limit > 0 {
                 Some(config.file_size_limit)
@@ -125,15 +122,15 @@ impl FlvPipeline {
             use_retrospective_splitting: false,
             on_split: None,
         };
-        let mut limit_operator = LimitOperator::with_config(context.clone(), limit_config);
-        let mut gop_sort_operator = GopSortOperator::new(context.clone());
-        let mut script_filter_operator = ScriptFilterOperator::new(context.clone());
+        let limit_operator = LimitOperator::with_config(context.clone(), limit_config);
+        let gop_sort_operator = GopSortOperator::new(context.clone());
+        let script_filter_operator = ScriptFilterOperator::new(context.clone());
         let timing_repair_operator =
             TimingRepairOperator::new(context.clone(), TimingRepairConfig::default());
-        let mut split_operator = SplitOperator::new(context.clone());
-        let mut time_consistency_operator =
+        let split_operator = SplitOperator::new(context.clone());
+        let time_consistency_operator =
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
-        let mut time_consistency_2_operator =
+        let time_consistency_2_operator =
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
 
         // Create the KeyframeIndexInjector operator if enabled
@@ -141,7 +138,7 @@ impl FlvPipeline {
             ScriptKeyframesFillerOperator::new(context.clone(), keyframe_config)
         });
 
-        let pipeline = NFlvPipeline::new(context.clone())
+        NFlvPipeline::new(context.clone())
             .add_processor(defrag_operator)
             .add_processor(header_check_operator)
             .add_processor(split_operator)
@@ -153,10 +150,7 @@ impl FlvPipeline {
             .add_processor(keyframe_index_operator.unwrap_or_else(|| {
                 ScriptKeyframesFillerOperator::new(context.clone(), ScriptFillerConfig::default())
             }))
-            .add_processor(script_filter_operator);
-            // 添加其他操作符... 
-
-        pipeline
+            .add_processor(script_filter_operator)
     }
 }
 
@@ -164,27 +158,20 @@ impl FlvPipeline {
 /// Tests for the FLV processing pipeline
 mod test {
     use super::*;
+    use crate::test_utils;
     use crate::writer_task::FlvWriterTask;
     use crate::{context::StreamerContext, writer_task::WriterError};
 
+    use flv::data::FlvData;
     use flv::parser_async::FlvDecoderStream;
     use futures::StreamExt;
     use std::path::Path;
-    use std::sync::mpsc;
-    use tracing::{debug, info};
-
-    // Helper to initialize tracing for tests
-    fn init_tracing() {
-        let _ = tracing_subscriber::fmt::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer() // Write to test output
-            .try_init();
-    }
+    use tracing::info;
 
     #[tokio::test]
     #[ignore]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
-        init_tracing(); // Initialize tracing for logging
+        test_utils::init_tracing(); // Initialize tracing for logging using our common utility
 
         // Source and destination paths
         let input_path = Path::new("D:/test/999/testHEVC.flv");
@@ -195,7 +182,6 @@ mod test {
             return Ok(());
         }
 
-        // let input_path = Path::new("E:/test/2024-12-21_00_06_24.flv");
         let output_dir = input_path.parent().ok_or("Invalid input path")?.join("fix");
         tokio::fs::create_dir_all(&output_dir)
             .await
@@ -219,35 +205,43 @@ mod test {
 
         // Start a task to parse the input file using async Decoder
         let file_reader = tokio::io::BufReader::new(tokio::fs::File::open(input_path).await?);
-        let decoder_stream = FlvDecoderStream::with_capacity(
+        let mut decoder_stream = FlvDecoderStream::with_capacity(
             file_reader,
             32 * 1024, // Input buffer capacity
         );
 
-        // Create the input stream for the pipeline
-        let input_stream = decoder_stream.boxed();
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
 
-        // Process the stream through the pipeline
-        let processed_stream = pipeline.process(input_stream);
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
 
-        // Create a channel to bridge between async Stream and sync Receiver
-        let (tx, rx) = mpsc::sync_channel(16);
+        let process_task = Some(tokio::task::spawn_blocking(move || {
+            let pipeline = pipeline.process();
 
-        // Spawn a task to forward items from the stream to the channel
-        let forward_task = tokio::spawn(async move {
-            futures::pin_mut!(processed_stream);
-            while let Some(result) = processed_stream.next().await {
-                if tx.send(result).is_err() {
-                    break; // Receiver dropped, exit the loop
+            let input = std::iter::from_fn(|| {
+                return receiver.recv().map(|v| Some(v)).unwrap_or(None);
+            });
+
+            let mut output = |result: Result<FlvData, FlvError>| {
+                if output_tx.send(result).is_err() {
+                    return; // Return early if channel is closed
                 }
+            };
+
+            if let Err(err) = pipeline.process(input, &mut output) {
+                output_tx
+                    .send(Err(FlvError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Pipeline error: {}", err),
+                    ))))
+                    .ok();
             }
-        });
+        }));
 
         // Run the writer task with the receiver
         let writer_handle = tokio::task::spawn_blocking(move || {
             let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
 
-            writer_task.run(rx)?;
+            writer_task.run(output_rx)?;
 
             Ok::<_, WriterError>((
                 writer_task.total_tags_written(),
@@ -256,8 +250,18 @@ mod test {
         });
 
         // Ensure the forwarding task completes
-        forward_task.await?;
+        while let Some(result) = decoder_stream.next().await {
+            sender.send(result).unwrap()
+        }
+        drop(sender); // Close the channel to signal completion
+
         let (total_tags_written, files_created) = writer_handle.await??;
+
+        // Wait for the processing task to finish
+        if let Some(p) = process_task {
+            p.await?;
+        }
+
         let elapsed = start_time.elapsed();
 
         info!(

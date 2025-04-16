@@ -53,6 +53,12 @@ impl ScriptFilterOperator {
             script_tag_count: 0,
         }
     }
+
+    /// Reset the operator state
+    pub fn reset(&mut self) {
+        self.seen_script_tag = false;
+        self.script_tag_count = 0;
+    }
 }
 
 impl FlvProcessor for ScriptFilterOperator {
@@ -64,9 +70,7 @@ impl FlvProcessor for ScriptFilterOperator {
         match input {
             FlvData::Header(_) => {
                 debug!("{} Resetting script tag filter state", self.context.name);
-                // Reset state on header
-                self.seen_script_tag = false;
-                self.script_tag_count = 0;
+                self.reset();
                 // Forward the header
                 output(input)
             } // Check if this is a script tag
@@ -114,93 +118,68 @@ impl FlvProcessor for ScriptFilterOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use flv::header::FlvHeader;
-    use flv::tag::FlvTag;
+    use crate::test_utils::{self, create_script_tag, create_test_header, create_video_tag};
 
-    // Helper functions for testing
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    fn create_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    fn create_script_tag(timestamp: u32, data: Vec<u8>) -> FlvData {
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::ScriptData,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_video_tag(timestamp: u32) -> FlvData {
-        let data = vec![0x17, 0x01, 0x00, 0x00, 0x00];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_filter_script_tags() {
-        let context = create_test_context();
+    #[test]
+    fn test_filter_script_tags() {
+        test_utils::init_tracing();
+        let context = test_utils::create_test_context();
         let mut operator = ScriptFilterOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send header
-        input_tx.send(Ok(create_header())).await.unwrap();
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
 
         // Send first script tag - should be kept
-        input_tx
-            .send(Ok(create_script_tag(0, vec![0x01, 0x02])))
-            .await
+        operator
+            .process(create_script_tag(0, true), &mut output_fn)
             .unwrap();
 
         // Send some video tags
-        input_tx.send(Ok(create_video_tag(10))).await.unwrap();
-        input_tx.send(Ok(create_video_tag(20))).await.unwrap();
+        operator
+            .process(create_video_tag(10, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(20, false), &mut output_fn)
+            .unwrap();
 
         // Send another script tag - should be discarded
-        input_tx
-            .send(Ok(create_script_tag(30, vec![0x03, 0x04])))
-            .await
+        operator
+            .process(create_script_tag(30, false), &mut output_fn)
             .unwrap();
 
         // Send more video tags
-        input_tx.send(Ok(create_video_tag(40))).await.unwrap();
-
-        // Send a third script tag - should be discarded
-        input_tx
-            .send(Ok(create_script_tag(50, vec![0x05, 0x06])))
-            .await
+        operator
+            .process(create_video_tag(40, true), &mut output_fn)
             .unwrap();
 
-        // Close input
-        drop(input_tx);
+        // Send a third script tag - should be discarded
+        operator
+            .process(create_script_tag(50, false), &mut output_fn)
+            .unwrap();
 
-        // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
         // Check we have the correct number of items (header + 1 script tag + 3 video tags = 5)
-        assert_eq!(results.len(), 5, "Expected 5 items, got {}", results.len());
+        assert_eq!(
+            output_items.len(),
+            5,
+            "Expected 5 items, got {}",
+            output_items.len()
+        );
 
         // Verify the order and types of tags
         let mut tag_types = Vec::new();
-        for item in &results {
+        for item in &output_items {
             match item {
                 FlvData::Header(_) => tag_types.push("Header"),
                 FlvData::Tag(tag) => match tag.tag_type {
@@ -220,65 +199,69 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_multiple_headers_reset_filtering() {
-        let context: Arc<StreamerContext> = create_test_context();
+    #[test]
+    fn test_multiple_headers_reset_filtering() {
+        test_utils::init_tracing();
+        let context = test_utils::create_test_context();
         let mut operator = ScriptFilterOperator::new(context);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // First segment
-        input_tx.send(Ok(create_header())).await.unwrap();
-        input_tx
-            .send(Ok(create_script_tag(0, vec![0x01])))
-            .await
+        operator
+            .process(create_test_header(), &mut output_fn)
             .unwrap();
-        input_tx.send(Ok(create_video_tag(10))).await.unwrap();
-        input_tx
-            .send(Ok(create_script_tag(20, vec![0x02])))
-            .await
+        operator
+            .process(create_script_tag(0, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_video_tag(10, true), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_script_tag(20, false), &mut output_fn)
             .unwrap(); // Should be discarded
 
         // Second segment (new header should reset filtering)
-        input_tx.send(Ok(create_header())).await.unwrap();
-        input_tx
-            .send(Ok(create_script_tag(0, vec![0x03])))
-            .await
+        operator
+            .process(create_test_header(), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_script_tag(0, true), &mut output_fn)
             .unwrap(); // Should be kept
-        input_tx.send(Ok(create_video_tag(10))).await.unwrap();
-        input_tx
-            .send(Ok(create_script_tag(20, vec![0x04])))
-            .await
+        operator
+            .process(create_video_tag(10, false), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_script_tag(20, false), &mut output_fn)
             .unwrap(); // Should be discarded
 
-        // Close input
-        drop(input_tx);
-
-        // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
         // Check we have the correct number of items (2 headers + 2 script tags + 2 video tags = 6)
-        assert_eq!(results.len(), 6, "Expected 6 items, got {}", results.len());
+        assert_eq!(
+            output_items.len(),
+            6,
+            "Expected 6 items, got {}",
+            output_items.len()
+        );
 
         // Verify each segment has exactly one script tag
         let mut first_segment_script_count = 0;
         let mut second_segment_script_count = 0;
         // first element should be the header
 
-        matches!(results[0], FlvData::Header(_));
+        assert!(matches!(output_items[0], FlvData::Header(_)));
         // The first segment is everything after the first header and before the second header
         let mut in_first_segment = true;
 
         // Iterate over the results starting from the second item
-        for item in &results[1..] {
+        for item in &output_items[1..] {
             match item {
                 FlvData::Header(_) => {
                     in_first_segment = false; // Switch to second segment after seeing second header

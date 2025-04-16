@@ -46,7 +46,7 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::{FlvOperator, FlvProcessor};
+use crate::operators::FlvProcessor;
 use amf0::{Amf0Marker, Amf0Value, write_amf_property_key};
 use byteorder::{BigEndian, WriteBytesExt};
 use bytes::Bytes;
@@ -54,11 +54,10 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType};
-use kanal::{AsyncReceiver, AsyncSender};
 use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 const DEFAULT_KEYFRAME_INTERVAL_MS: u32 = (3.5 * 60.0 * 60.0 * 1000.0) as u32; // 3.5 hours in ms
 pub const MIN_INTERVAL_BETWEEN_KEYFRAMES_MS: u32 = 1900; // 1.9 seconds in ms
@@ -459,8 +458,6 @@ impl FlvProcessor for ScriptKeyframesFillerOperator {
         input: FlvData,
         output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
     ) -> Result<(), FlvError> {
-        debug!("{} Starting script modification process", self.context.name);
-
         match input {
             FlvData::Header(_) => {
                 debug!("{} Received Header. Forwarding.", self.context.name);
@@ -515,85 +512,11 @@ impl FlvProcessor for ScriptKeyframesFillerOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{self, create_script_tag};
     use amf0::Amf0Value;
     use bytes::Bytes;
-    use flv::header::FlvHeader;
-    use kanal::{bounded_async, unbounded_async};
+    use flv::{header::FlvHeader, tag::FlvTagType};
     use std::collections::HashMap;
-    use std::time::Duration;
-
-    // Helper to initialize tracing for tests
-    fn init_tracing() {
-        let _ = tracing_subscriber::fmt::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer() // Write to test output
-            .try_init();
-    }
-
-    // Helper function to create a StreamerContext for testing
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    // Helper function to create a script tag with onMetaData
-    fn create_metadata_tag(with_keyframes: bool) -> FlvTag {
-        let mut properties = vec![
-            (Cow::Borrowed("duration"), Amf0Value::Number(120.5)),
-            (Cow::Borrowed("width"), Amf0Value::Number(1920.0)),
-            (Cow::Borrowed("height"), Amf0Value::Number(1080.0)),
-            (Cow::Borrowed("videocodecid"), Amf0Value::Number(7.0)),
-            (Cow::Borrowed("audiocodecid"), Amf0Value::Number(10.0)),
-        ];
-
-        if with_keyframes {
-            let keyframes_obj = vec![
-                (
-                    Cow::Borrowed("times"),
-                    Amf0Value::StrictArray(Cow::Owned(vec![
-                        Amf0Value::Number(0.0),
-                        Amf0Value::Number(5.0),
-                    ])),
-                ),
-                (
-                    Cow::Borrowed("filepositions"),
-                    Amf0Value::StrictArray(Cow::Owned(vec![
-                        Amf0Value::Number(100.0),
-                        Amf0Value::Number(2500.0),
-                    ])),
-                ),
-            ];
-
-            properties.push((
-                Cow::Borrowed("keyframes"),
-                Amf0Value::Object(Cow::Owned(keyframes_obj)),
-            ));
-        }
-
-        let obj = Amf0Value::Object(Cow::Owned(properties));
-        let mut buffer = Vec::new();
-        amf0::Amf0Encoder::encode_string(&mut buffer, "onMetaData").unwrap();
-        amf0::Amf0Encoder::encode(&mut buffer, &obj).unwrap();
-
-        FlvTag {
-            timestamp_ms: 0,
-            stream_id: 0,
-            tag_type: FlvTagType::ScriptData,
-            data: Bytes::from(buffer),
-        }
-    }
-
-    // Helper function to create a video tag
-    fn create_video_tag() -> FlvTag {
-        // Simple video tag data - doesn't need to be valid for our tests
-        let data = vec![0x17, 0x01, 0x00, 0x00, 0x00]; // H.264 keyframe
-
-        FlvTag {
-            timestamp_ms: 10,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        }
-    }
 
     // Helper function to extract keyframes object from tag data
     fn extract_keyframes(tag: &FlvTag) -> Option<HashMap<String, Vec<f64>>> {
@@ -628,16 +551,20 @@ mod tests {
         None
     }
 
-    #[tokio::test]
-    async fn test_add_keyframes_to_amf() {
-        init_tracing();
-        let context = create_test_context();
+    #[test]
+    fn test_add_keyframes_to_amf() {
+        test_utils::init_tracing();
+        let context = test_utils::create_test_context();
         let config = ScriptFillerConfig::default();
         let operator = ScriptKeyframesFillerOperator::new(context, config);
 
         // Test case 1: Tag without keyframes should have them added
-        let tag = create_metadata_tag(false);
-        let mut modified_tag = operator.add_keyframes_to_amf(tag).unwrap();
+        let tag = create_script_tag(0, false);
+        let tag = match tag {
+            FlvData::Tag(tag) => tag,
+            _ => panic!("Expected FlvData::Tag but got something else"),
+        };
+        let modified_tag = operator.add_keyframes_to_amf(tag).unwrap();
 
         // Verify keyframes were added
         let keyframes = extract_keyframes(&modified_tag);
@@ -649,10 +576,14 @@ mod tests {
         assert!(keyframes.contains_key("spacer"));
 
         // Check that spacer has the right length
-        assert!(keyframes.get("spacer").unwrap().len() > 100,);
+        assert!(keyframes.get("spacer").unwrap().len() > 100);
 
         // Test case 2: Tag with existing keyframes should have them replaced
-        let tag = create_metadata_tag(true);
+        let tag = create_script_tag(0, true);
+        let tag = match tag {
+            FlvData::Tag(tag) => tag,
+            _ => panic!("Expected FlvData::Tag but got something else"),
+        };
         let modified_tag = operator.add_keyframes_to_amf(tag).unwrap();
 
         // Verify keyframes were modified
@@ -666,102 +597,132 @@ mod tests {
         assert!(keyframes.get("filepositions").unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_process_flow() {
-        init_tracing();
-        let context = create_test_context();
+    #[test]
+    fn test_process_flow() {
+        test_utils::init_tracing();
+        let context = test_utils::create_test_context();
         let config = ScriptFillerConfig::default();
         let mut operator = ScriptKeyframesFillerOperator::new(context, config);
+        let mut output_items = Vec::new();
 
-        // Create channels
-        let (tx_input, rx_input) = unbounded_async();
-        let (tx_output, rx_output) = unbounded_async();
-
-        // Start operator in background
-        let operator_task = tokio::spawn(async move {
-            operator.process(rx_input, tx_output).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send header
-        let header = FlvHeader::new(true, true);
-        tx_input.send(Ok(FlvData::Header(header))).await.unwrap();
+        operator
+            .process(FlvData::Header(FlvHeader::new(true, true)), &mut output_fn)
+            .unwrap();
 
         // Send script tag
-        let script_tag = create_metadata_tag(false);
-        tx_input.send(Ok(FlvData::Tag(script_tag))).await.unwrap();
+        let script_tag = create_script_tag(0, false);
+        operator.process(script_tag, &mut output_fn).unwrap();
 
         // Send video tag
-        let video_tag = create_video_tag();
-        tx_input
-            .send(Ok(FlvData::Tag(video_tag.clone())))
-            .await
-            .unwrap();
+        let video_tag = test_utils::create_video_tag(10, true);
+        let video_tag_clone = video_tag.clone();
+        operator.process(video_tag, &mut output_fn).unwrap();
 
-        // Send another script tag (should be ignored for modification)
-        let second_script_tag = create_metadata_tag(false);
-        tx_input
-            .send(Ok(FlvData::Tag(second_script_tag.clone())))
-            .await
-            .unwrap();
+        // Send another script tag (should be forwarded without modification)
+        let second_script_tag = create_script_tag(0, false);
+        operator.process(second_script_tag, &mut output_fn).unwrap();
 
         // Check outputs
+        assert_eq!(output_items.len(), 4, "Should have 4 items in output");
 
         // Header should be passed through unchanged
-        let header_out = rx_output.recv().await.unwrap().unwrap();
-        assert!(matches!(header_out, FlvData::Header(_)));
+        if let FlvData::Header(_) = &output_items[0] {
+            // Header passed through correctly
+        } else {
+            panic!("Expected header as first output item");
+        }
 
         // First script tag should be modified
-        let script_out = rx_output.recv().await.unwrap().unwrap();
-        if let FlvData::Tag(tag) = script_out {
+        if let FlvData::Tag(tag) = &output_items[1] {
             assert_eq!(tag.tag_type, FlvTagType::ScriptData);
-            let keyframes = extract_keyframes(&tag);
-            assert!(keyframes.is_some());
+            let keyframes = extract_keyframes(tag);
+            assert!(
+                keyframes.is_some(),
+                "First script tag should have keyframes added"
+            );
         } else {
-            panic!("Expected script tag");
+            panic!("Expected script tag as second output item");
         }
 
         // Video tag should be unchanged
-        let video_out = rx_output.recv().await.unwrap().unwrap();
-        if let FlvData::Tag(tag) = video_out {
+        if let FlvData::Tag(tag) = &output_items[2] {
             assert_eq!(tag.tag_type, FlvTagType::Video);
-            assert_eq!(tag.timestamp_ms, video_tag.timestamp_ms);
+            if let FlvData::Tag(video) = &video_tag_clone {
+                assert_eq!(tag.timestamp_ms, video.timestamp_ms);
+            } else {
+                panic!("Expected video_tag to be FlvData::Tag");
+            }
         } else {
-            panic!("Expected video tag");
+            panic!("Expected video tag as third output item");
         }
 
         // Second script tag should be unchanged
-        // Note: In the current implementation, subsequent script tags are not forwarded
-        // So we don't check for them here.
-
-        // Clean up
-        drop(tx_input);
-        let _ = tokio::time::timeout(Duration::from_secs(1), operator_task).await;
+        if let FlvData::Tag(tag) = &output_items[3] {
+            assert_eq!(tag.tag_type, FlvTagType::ScriptData);
+            // It should be a different object than the first script tag
+            if let FlvData::Tag(first_script) = &output_items[1] {
+                assert_ne!(
+                    tag.data, first_script.data,
+                    "Second script tag should not be modified"
+                );
+            }
+        } else {
+            panic!("Expected script tag as fourth output item");
+        }
     }
 
-    #[tokio::test]
-    async fn test_error_handling() {
-        let context = create_test_context();
+    #[test]
+    fn test_malformed_script_data() {
+        test_utils::init_tracing();
+        let context = test_utils::create_test_context();
         let config = ScriptFillerConfig::default();
         let mut operator = ScriptKeyframesFillerOperator::new(context, config);
+        let mut output_items = Vec::new();
 
-        let (tx_input, rx_input) = bounded_async(10);
-        let (tx_output, mut rx_output) = bounded_async(10);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Start operator in background
-        let operator_task = tokio::spawn(async move {
-            operator.process(rx_input, tx_output).await;
-        });
+        // Send header
+        operator
+            .process(FlvData::Header(FlvHeader::new(true, true)), &mut output_fn)
+            .unwrap();
 
-        // Send an error
-        let test_error = FlvError::Io(io::Error::new(io::ErrorKind::Other, "test error"));
-        tx_input.send(Err(test_error)).await.unwrap();
+        // Create a malformed script tag with invalid AMF data
+        let invalid_script_tag = FlvTag {
+            timestamp_ms: 0,
+            stream_id: 0,
+            tag_type: FlvTagType::ScriptData,
+            data: Bytes::from(vec![
+                0x02, 0x00, 0x0A, 0x6E, 0x6F, 0x74, 0x4D, 0x65, 0x74, 0x61, 0x44, 0x61, 0x74, 0x61,
+            ]), // "notMetaData" without proper AMF structure
+        };
 
-        // The error should be forwarded
-        let error_out = rx_output.recv().await.unwrap();
-        assert!(error_out.is_err());
+        // Process should handle malformed data and create a fallback
+        operator
+            .process(FlvData::Tag(invalid_script_tag), &mut output_fn)
+            .unwrap();
 
-        // Clean up
-        drop(tx_input);
-        let _ = tokio::time::timeout(Duration::from_secs(1), operator_task).await;
+        // Check that we got a valid script tag back
+        if let FlvData::Tag(tag) = &output_items[1] {
+            assert_eq!(tag.tag_type, FlvTagType::ScriptData);
+            // Should contain valid AMF data now
+            let keyframes = extract_keyframes(tag);
+            assert!(
+                keyframes.is_some(),
+                "Should have valid keyframes structure even with invalid input"
+            );
+        } else {
+            panic!("Expected script tag as second output item");
+        }
     }
 }

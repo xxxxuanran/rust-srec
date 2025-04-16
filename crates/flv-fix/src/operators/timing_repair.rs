@@ -50,14 +50,13 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType, FlvUtil};
-use kanal::{AsyncReceiver, AsyncSender};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::f64;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use super::{FlvOperator, FlvProcessor};
+use super::FlvProcessor;
 
 /// The tolerance for timestamp correction due to floating point conversion errors
 /// Since millisecond precision (1/1000 of a second) can't exactly represent many common frame rates
@@ -636,6 +635,7 @@ impl FlvProcessor for TimingRepairOperator {
         &mut self,
         output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
     ) -> Result<(), FlvError> {
+        let _ = output;
         // Finalize processing and log statistics
         info!(
             "{} TimingRepair complete: Processed {} tags, applied {} corrections, detected {} rebounds and {} discontinuities",
@@ -656,151 +656,75 @@ impl FlvProcessor for TimingRepairOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use flv::header::FlvHeader;
+    use crate::test_utils::{
+        create_audio_sequence_header, create_audio_tag, create_test_context, create_test_header,
+        create_video_sequence_header, create_video_tag, print_tags,
+    };
 
-    // Helper functions for testing
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
-
-    fn create_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    fn create_video_tag(timestamp: u32) -> FlvData {
-        let data = vec![0x17, 0x01, 0x00, 0x00, 0x00];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_audio_tag(timestamp: u32) -> FlvData {
-        let data = vec![0xAF, 0x01, 0x21, 0x10, 0x04];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_video_sequence_tag(timestamp: u32) -> FlvData {
-        let data = vec![
-            0x17, // frame type 1 (keyframe) + codec id 7 (AVC)
-            0x00, // AVC sequence header
-            0x00, 0x00, 0x00, // composition time
-            0x01, // version
-            0x64, 0x00, 0x1F, 0xFF, // SPS parameter set stuff
-        ];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_audio_sequence_tag(timestamp: u32) -> FlvData {
-        let data = vec![
-            0xAF, // Audio format 10 (AAC) + sample rate 3 (44kHz) + sample size 1 (16-bit) + stereo
-            0x00, // AAC sequence header
-            0x12, 0x10, // AAC config
-        ];
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    fn create_script_tag_with_metadata(frame_rate: f64, audio_rate: f64) -> FlvData {
-        // This is a simplified version - in a real implementation we would create a proper AMF object
-        let data = Vec::new(); // We would need to serialize AMF data here
-        FlvData::Tag(FlvTag {
-            timestamp_ms: 0,
-            stream_id: 0,
-            tag_type: FlvTagType::ScriptData,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_timestamp_rebound_correction() {
+    fn process_tags_through_operator(
+        config: TimingRepairConfig,
+        input_tags: Vec<FlvData>,
+    ) -> Vec<FlvData> {
         let context = create_test_context();
+        let mut operator = TimingRepairOperator::new(context, config);
+
+        // Collect results in a vector
+        let mut results = Vec::new();
+
+        // Process each tag through the operator with a closure to collect the output
+        for tag in input_tags {
+            let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+                results.push(item);
+                Ok(())
+            };
+
+            // Process the tag
+            operator.process(tag, &mut output_fn).unwrap();
+        }
+
+        // Finish processing
+        let mut finish_output = |item: FlvData| -> Result<(), FlvError> {
+            results.push(item);
+            Ok(())
+        };
+        operator.finish(&mut finish_output).unwrap();
+
+        results
+    }
+
+    #[test]
+    fn test_timestamp_rebound_correction() {
+        // Create input tags
+        let mut input_tags = Vec::new();
+        input_tags.push(create_test_header());
+        input_tags.push(create_video_sequence_header(1));
+        input_tags.push(create_audio_sequence_header(1));
+
+        // Regular tags with increasing timestamps
+        for i in 1..5 {
+            input_tags.push(create_video_tag(i * 33, true));
+            input_tags.push(create_audio_tag(i * 33 + 5));
+        }
+
+        // Tag with timestamp rebound (going backwards)
+        input_tags.push(create_video_tag(50, true));
+
+        // More regular tags
+        for i in 6..10 {
+            input_tags.push(create_video_tag(i * 33, true));
+            input_tags.push(create_audio_tag(i * 33 + 5));
+        }
+
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Strict,
             debug: true,
             ..Default::default()
         };
 
-        let mut operator = TimingRepairOperator::new(context, config);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send header
-        input_tx.send(Ok(create_header())).await.unwrap();
-
-        // Send video sequence header
-        input_tx
-            .send(Ok(create_video_sequence_tag(0)))
-            .await
-            .unwrap();
-
-        // Send audio sequence header
-        input_tx
-            .send(Ok(create_audio_sequence_tag(0)))
-            .await
-            .unwrap();
-
-        // Send regular tags with increasing timestamps
-        for i in 1..5 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-            input_tx
-                .send(Ok(create_audio_tag(i * 33 + 5)))
-                .await
-                .unwrap();
-        }
-
-        // Send a tag with timestamp rebound (goes backwards)
-        input_tx.send(Ok(create_video_tag(50))).await.unwrap();
-
-        // Send more regular tags
-        for i in 6..10 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-            input_tx
-                .send(Ok(create_audio_tag(i * 33 + 5)))
-                .await
-                .unwrap();
-        }
-
-        // Close input
-        drop(input_tx);
-
-        // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
+        let results = process_tags_through_operator(config, input_tags);
 
         // Print results for analysis
-        for (i, item) in results.iter().enumerate() {
-            if let FlvData::Tag(tag) = item {
-                println!(
-                    "Tag {}: {:?} timestamp = {}ms",
-                    i, tag.tag_type, tag.timestamp_ms
-                );
-            }
-        }
+        print_tags(&results);
 
         // The rebounded timestamp should be corrected to maintain forward progress
         // Find the tag at the rebound point and check if it has been properly corrected
@@ -821,62 +745,38 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_timestamp_discontinuity_correction() {
-        let context = create_test_context();
+    #[test]
+    fn test_timestamp_discontinuity_correction() {
+        // Create input tags
+        let mut input_tags = Vec::new();
+        input_tags.push(create_test_header());
+
+        // Regular tags with increasing timestamps
+        for i in 1..5 {
+            input_tags.push(create_video_tag(i * 33, true));
+        }
+
+        // Tag with large timestamp jump (discontinuity)
+        input_tags.push(create_video_tag(5000, true));
+
+        // More regular tags after the jump
+        for i in 151..155 {
+            input_tags.push(create_video_tag(i * 33, true));
+        }
+
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Strict,
             debug: true,
             ..Default::default()
         };
 
-        let mut operator = TimingRepairOperator::new(context, config);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send header
-        input_tx.send(Ok(create_header())).await.unwrap();
-
-        // Send regular tags with increasing timestamps
-        for i in 1..5 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-        }
-
-        // Send a tag with large timestamp jump (discontinuity)
-        input_tx.send(Ok(create_video_tag(5000))).await.unwrap();
-
-        // Send more regular tags after the jump
-        for i in 151..155 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-        }
-
-        // Close input
-        drop(input_tx);
-
-        // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
+        let results = process_tags_through_operator(config, input_tags);
 
         // Print results for analysis
-        for (i, item) in results.iter().enumerate() {
-            if let FlvData::Tag(tag) = item {
-                println!(
-                    "Tag {}: {:?} timestamp = {}ms",
-                    i, tag.tag_type, tag.timestamp_ms
-                );
-            }
-        }
+        print_tags(&results);
 
         // The discontinuity should be smoothed out
         // The tag after the jump should have a reasonable timestamp increase from the previous tag
-
         if let FlvData::Tag(tag1) = &results[4] {
             if let FlvData::Tag(tag2) = &results[5] {
                 let diff = tag2.timestamp_ms - tag1.timestamp_ms;
@@ -888,54 +788,36 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_av_sync_maintenance() {
-        let context = create_test_context();
+    #[test]
+    fn test_av_sync_maintenance() {
+        // Create input tags
+        let mut input_tags = Vec::new();
+        input_tags.push(create_test_header());
+
+        // Interleaved audio and video with audio slightly ahead
+        for i in 1..10 {
+            input_tags.push(create_video_tag(i * 33, true));
+            input_tags.push(create_audio_tag(i * 33 + 5));
+        }
+
+        // Audio with major sync issue (far ahead of video)
+        input_tags.push(create_audio_tag(800));
+
+        // Continue with normal video
+        for i in 10..15 {
+            input_tags.push(create_video_tag(i * 33, true));
+        }
+
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Relaxed,
             debug: true,
             ..Default::default()
         };
 
-        let mut operator = TimingRepairOperator::new(context, config);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send header
-        input_tx.send(Ok(create_header())).await.unwrap();
-
-        // Send interleaved audio and video with audio slightly ahead
-        for i in 1..10 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-            input_tx
-                .send(Ok(create_audio_tag(i * 33 + 5)))
-                .await
-                .unwrap();
-        }
-
-        // Send audio with major sync issue (far ahead of video)
-        input_tx.send(Ok(create_audio_tag(800))).await.unwrap();
-
-        // Continue with normal video
-        for i in 10..15 {
-            input_tx.send(Ok(create_video_tag(i * 33))).await.unwrap();
-        }
-
-        // Close input
-        drop(input_tx);
-
         // Collect results
-        let mut results = Vec::new();
-        while let Ok(result) = output_rx.recv().await {
-            results.push(result.unwrap());
-        }
+        let results = process_tags_through_operator(config, input_tags);
 
-        // Extract audio and video timestamps to check sync
+        // Extract audio and video timestamps
         let mut audio_ts = Vec::new();
         let mut video_ts = Vec::new();
 

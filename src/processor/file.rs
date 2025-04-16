@@ -2,12 +2,11 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::parser_async::FlvDecoderStream;
 use flv_fix::context::StreamerContext;
-use flv_fix::pipeline::{BoxStream, FlvPipeline, PipelineConfig};
+use flv_fix::pipeline::{FlvPipeline, PipelineConfig};
 use flv_fix::writer_task::{FlvWriterTask, WriterError};
 use futures::StreamExt;
 use indicatif::HumanBytes;
 use std::path::Path;
-use std::sync::mpsc;
 use tokio::fs::File;
 use tokio::io::BufReader;
 use tracing::info;
@@ -63,11 +62,11 @@ pub async fn process_file(
     );
 
     // Create the input stream
-    let (sender, mut receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
 
     let mut process_task = None;
 
-    let mut processed_stream = if enable_processing {
+    let processed_stream = if enable_processing {
         // Processing mode: run through the processing pipeline
         info!(
             path = %input_path.display(),
@@ -79,24 +78,21 @@ pub async fn process_file(
         let context = StreamerContext::default();
         let pipeline = FlvPipeline::with_config(context, config);
 
-        let (output_tx, mut output_rx) =
-            std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
 
         process_task = Some(tokio::task::spawn_blocking(move || {
-            let nflv = pipeline.process();
+            let pipeline = pipeline.process();
 
             let input = std::iter::from_fn(|| {
-                // 读取输入流
-                // let input = .unwrap();
-
-                return receiver.recv().map(|v| Some(v)).unwrap_or(None);
+                // Read from the receiver channel
+                receiver.recv().map(Some).unwrap_or(None)
             });
 
             let mut output = |result: Result<FlvData, FlvError>| {
-                // 处理输出
+                // Send the processed result to the output channel
                 output_tx.send(result).unwrap();
             };
-            nflv.process(input, &mut output).unwrap();
+            pipeline.process(input, &mut output).unwrap();
         }));
         output_rx
     } else {
@@ -133,12 +129,11 @@ pub async fn process_file(
     // let bytes_processed = reader_handle.await?;
     let bytes_processed = 1000;
 
-  
     while let Some(result) = decoder_stream.next().await {
         sender.send(result).unwrap()
     }
     drop(sender); // Close the channel to signal completion
-    
+
     info!(
         path = %input_path.display(),
         "Finished processing input stream"

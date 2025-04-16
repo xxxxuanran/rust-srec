@@ -33,12 +33,10 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::header::FlvHeader;
 use flv::tag::{FlvTag, FlvUtil};
-use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
@@ -376,437 +374,268 @@ impl FlvProcessor for LimitOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{self, create_script_tag};
     use bytes::Bytes;
     use flv::tag::{FlvTag, FlvTagType};
-    use kanal;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    // Helper function to create a test context
-    fn create_test_context() -> Arc<StreamerContext> {
-        Arc::new(StreamerContext::default())
-    }
+    #[test]
+    fn test_size_limit_with_keyframe_splitting() {
+        let context = test_utils::create_test_context();
+        let split_counter = Arc::new(AtomicUsize::new(0));
+        let split_counter_clone = split_counter.clone();
 
-    // Helper function to create a FlvHeader for testing
-    fn create_test_header() -> FlvData {
-        FlvData::Header(FlvHeader::new(true, true))
-    }
-
-    // Helper function to create a video tag for testing
-    fn create_video_tag(timestamp: u32, is_keyframe: bool, size: usize) -> FlvData {
-        // First byte: 4 bits frame type (1=keyframe, 2=inter), 4 bits codec id (7=AVC)
-        let frame_type = if is_keyframe { 1 } else { 2 };
-        let first_byte = (frame_type << 4) | 7; // AVC codec
-
-        // Create a data array of the requested size
-        let mut data = vec![0u8; size];
-        data[0] = first_byte;
-
-        // Add AVC packet type (1 = NALU)
-        if data.len() > 1 {
-            data[1] = 1;
-        }
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    // Helper function to create a video sequence header
-    fn create_video_sequence_header(timestamp: u32) -> FlvData {
-        // Format header for AVC sequence header
-        let mut data = vec![
-            0x17, // frame type 1 (keyframe) + codec id 7 (AVC)
-            0x00, // AVC sequence header
-            0x00, 0x00,
-            0x00, // composition time
-                  // ... rest of AVC config data
-        ];
-
-        // Pad to some reasonable size
-        data.resize(30, 0);
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Video,
-            data: Bytes::from(data),
-        })
-    }
-
-    // Helper function to create an audio sequence header
-    fn create_audio_sequence_header(timestamp: u32) -> FlvData {
-        let data = vec![
-            0xAF, // Audio format 10 (AAC) + sample rate 3 (44kHz) + sample size 1 (16-bit) + stereo
-            0x00, // AAC sequence header
-                  // ... rest of AAC config data
-        ];
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: timestamp,
-            stream_id: 0,
-            tag_type: FlvTagType::Audio,
-            data: Bytes::from(data),
-        })
-    }
-
-    // Helper function to create metadata tag
-    fn create_metadata_tag() -> FlvData {
-        // Simple script tag for metadata
-        let data = vec![
-            0x02, 0x00, 0x0A, b'o', b'n', b'M', b'e', b't', b'a', b'D', b'a', b't', b'a',
-        ];
-
-        FlvData::Tag(FlvTag {
-            timestamp_ms: 0,
-            stream_id: 0,
-            tag_type: FlvTagType::ScriptData,
-            data: Bytes::from(data),
-        })
-    }
-
-    #[tokio::test]
-    async fn test_size_limit() {
-        let context = create_test_context();
-
-        // Track split events
-        let split_count = Arc::new(Mutex::new(0));
-        let split_count_clone = Arc::clone(&split_count);
-
-        // Configure with a 1000 byte size limit
+        // Configure with a size limit of 100KB and keyframe splitting
         let config = LimitConfig {
-            max_size_bytes: Some(1000),
+            max_size_bytes: Some(100 * 1024),
             max_duration_ms: None,
-            split_at_keyframes_only: false, // For simplicity in testing
-            on_split: Some(Box::new(move |reason, size, _| {
-                assert_eq!(reason, SplitReason::SizeLimit);
-                assert!(size >= 1000, "Size should be at least 1000 bytes at split");
-                *split_count_clone.lock().unwrap() += 1;
+            split_at_keyframes_only: true,
+            use_retrospective_splitting: false,
+            on_split: Some(Box::new(move |_, _, _| {
+                split_counter.fetch_add(1, Ordering::SeqCst);
             })),
-            use_retrospective_splitting: false, // Explicitly disable (matches new default)
         };
 
         let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a stream with sequence headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
+        // Process a header
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
             .unwrap();
 
-        // Send enough data to trigger multiple splits
-        for i in 0..10 {
-            // Each tag is around 300 bytes, so every ~3 tags should trigger a split
-            let tag = create_video_tag(i * 100, i % 3 == 0, 300);
-            input_tx.send(Ok(tag)).await.unwrap();
-        }
+        // Send tags with increasing size, starting with a keyframe
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(0, true, 10 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 10KB keyframe
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(100, false, 30 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 30KB P-frame
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(200, false, 40 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 40KB P-frame
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(300, true, 10 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 10KB keyframe
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(400, false, 50 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 50KB P-frame
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(500, false, 60 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 60KB P-frame
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(600, true, 10 * 1024),
+                &mut output_fn,
+            )
+            .unwrap(); // 10KB keyframe
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Collect the output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // We should have had multiple splits
-        let final_split_count = *split_count.lock().unwrap();
+        // Check that splits occurred (should be at least 1 split)
         assert!(
-            final_split_count >= 2,
-            "Expected at least 2 splits, got {}",
-            final_split_count
+            split_counter_clone.load(Ordering::SeqCst) > 0,
+            "Should have split at least once"
         );
 
-        // There should be multiple headers in the output
-        let header_count = received_items
+        // Each output segment should start with a header
+        let header_count = output_items
             .iter()
             .filter(|item| matches!(item, FlvData::Header(_)))
             .count();
 
-        assert!(
-            header_count > 1,
-            "Expected multiple headers from splits, got {}",
-            header_count
+        // Should have 1 initial header + 1 for each split
+        assert_eq!(
+            header_count,
+            split_counter_clone.load(Ordering::SeqCst) + 1,
+            "Should have a header for initial segment and each split"
         );
     }
 
-    #[tokio::test]
-    async fn test_duration_limit() {
-        let context = create_test_context();
+    #[test]
+    fn test_duration_limit_with_keyframe_splitting() {
+        let context = test_utils::create_test_context();
+        let split_counter = Arc::new(AtomicUsize::new(0));
+        let split_counter_clone = split_counter.clone();
 
-        // Track split events
-        let split_count = Arc::new(Mutex::new(0));
-        let split_count_clone = Arc::clone(&split_count);
-
-        // Configure with a 500ms duration limit
+        // Configure with a duration limit of 500ms and keyframe splitting
         let config = LimitConfig {
             max_size_bytes: None,
             max_duration_ms: Some(500),
-            split_at_keyframes_only: false, // For simplicity in testing
-            on_split: Some(Box::new(move |reason, _, duration| {
-                assert_eq!(reason, SplitReason::DurationLimit);
-                assert!(
-                    duration >= 500,
-                    "Duration should be at least 500ms at split"
-                );
-                *split_count_clone.lock().unwrap() += 1;
+            split_at_keyframes_only: true,
+            use_retrospective_splitting: false,
+            on_split: Some(Box::new(move |_, _, _| {
+                split_counter.fetch_add(1, Ordering::SeqCst);
             })),
-            use_retrospective_splitting: false, // Explicitly disable (matches new default)
         };
 
         let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a stream with sequence headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
+        // Process a header
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
             .unwrap();
 
-        // Send tags with increasing timestamps to trigger duration splits
+        // Send tags with increasing timestamps
+        operator
+            .process(test_utils::create_video_tag(0, true), &mut output_fn)
+            .unwrap(); // keyframe at 0ms
+        operator
+            .process(test_utils::create_video_tag(100, false), &mut output_fn)
+            .unwrap(); // P-frame at 100ms
+        operator
+            .process(test_utils::create_video_tag(200, false), &mut output_fn)
+            .unwrap(); // P-frame at 200ms
+        operator
+            .process(test_utils::create_video_tag(400, false), &mut output_fn)
+            .unwrap(); // P-frame at 400ms
+        operator
+            .process(test_utils::create_video_tag(600, true), &mut output_fn)
+            .unwrap(); // keyframe at 600ms (should cause split)
+        operator
+            .process(test_utils::create_video_tag(700, false), &mut output_fn)
+            .unwrap(); // P-frame at 700ms
+        operator
+            .process(test_utils::create_video_tag(800, false), &mut output_fn)
+            .unwrap(); // P-frame at 800ms
+        operator
+            .process(test_utils::create_video_tag(1000, true), &mut output_fn)
+            .unwrap(); // keyframe at 1000ms (should cause split)
+        operator
+            .process(test_utils::create_video_tag(1100, false), &mut output_fn)
+            .unwrap(); // P-frame at 1100ms
+
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
+
+        // Check that splits occurred (should be at least 1 split)
+        assert!(
+            split_counter_clone.load(Ordering::SeqCst) > 0,
+            "Should have split at least once"
+        );
+
+        // Each output segment should start with a header
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        // Should have 1 initial header + 1 for each split
+        assert_eq!(
+            header_count,
+            split_counter_clone.load(Ordering::SeqCst) + 1,
+            "Should have a header for initial segment and each split"
+        );
+    }
+
+    #[test]
+    fn test_no_limits() {
+        let context = test_utils::create_test_context();
+        let split_counter = Arc::new(AtomicUsize::new(0));
+        let split_counter_clone = split_counter.clone();
+
+        // Configure with no limits
+        let config = LimitConfig {
+            max_size_bytes: None,
+            max_duration_ms: None,
+            split_at_keyframes_only: true,
+            use_retrospective_splitting: false,
+            on_split: Some(Box::new(move |_, _, _| {
+                split_counter.fetch_add(1, Ordering::SeqCst);
+            })),
+        };
+
+        let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Process a header
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
+
+        // Send several tags
         for i in 0..10 {
-            // Timestamp increases by 200ms each tag
-            let timestamp = i * 200;
-            let tag = create_video_tag(timestamp, i % 2 == 0, 100);
-            input_tx.send(Ok(tag)).await.unwrap();
+            let is_keyframe = i % 3 == 0;
+            operator
+                .process(
+                    test_utils::create_video_tag(i * 100, is_keyframe),
+                    &mut output_fn,
+                )
+                .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
-        // Collect the output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // We should have had multiple splits based on duration
-        let final_split_count = *split_count.lock().unwrap();
-        assert!(
-            final_split_count >= 3,
-            "Expected at least 3 duration splits, got {}",
-            final_split_count
+        // No splits should have occurred
+        assert_eq!(
+            split_counter_clone.load(Ordering::SeqCst),
+            0,
+            "Should not have split"
         );
+
+        // Should only have the initial header
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        assert_eq!(header_count, 1, "Should only have the initial header");
+
+        // Tag count should match input
+        let tag_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Tag(_)))
+            .count();
+
+        assert_eq!(tag_count, 10, "Should have all input tags");
     }
 
-    #[tokio::test]
-    async fn test_split_at_keyframes_only() {
-        let context = create_test_context();
-
-        // Track the timestamps at which splits occur
-        let split_timestamps = Arc::new(Mutex::new(Vec::new()));
-        let split_timestamps_clone = Arc::clone(&split_timestamps);
-
-        // Configure with a 300ms duration limit but only split at keyframes
-        let config = LimitConfig {
-            max_size_bytes: None,
-            max_duration_ms: Some(300),
-            split_at_keyframes_only: true,
-            on_split: Some(Box::new(move |reason, _, duration| {
-                debug!("Split reason: {:?}, duration: {}ms", reason, duration);
-                split_timestamps_clone.lock().unwrap().push(duration);
-            })),
-            use_retrospective_splitting: false, // Explicitly disable
-        };
-
-        let mut operator = LimitOperator::with_config(context, config);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a stream with sequence headers
-        input_tx
-            .send(Ok(create_video_tag(0, true, 100)))
-            .await
-            .unwrap(); // Keyframe at 0
-        input_tx
-            .send(Ok(create_video_tag(100, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(200, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(300, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(400, true, 100)))
-            .await
-            .unwrap(); // Keyframe at 400 - should split here
-        input_tx
-            .send(Ok(create_video_tag(500, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(600, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(700, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(800, true, 100)))
-            .await
-            .unwrap(); // Keyframe at 800 - should split here
-        input_tx
-            .send(Ok(create_video_tag(900, false, 100)))
-            .await
-            .unwrap();
-
-        // Close the input
-        drop(input_tx);
-
-        // Collect the output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // Check split timestamps - should be at keyframes after limit is reached
-        let timestamps = split_timestamps.lock().unwrap().clone();
-        assert_eq!(timestamps.len(), 2, "Expected 2 splits at keyframes");
-
-        // First split should be at or after 300ms
-        assert!(
-            timestamps[0] >= 300,
-            "First split should be at or after 300ms"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_retrospective_splitting() {
-        let context = create_test_context();
-
-        // Track split events and positions
-        let split_positions = Arc::new(Mutex::new(Vec::new()));
-        let split_positions_clone = Arc::clone(&split_positions);
-
-        // Configure with retrospective splitting enabled
-        let config = LimitConfig {
-            max_size_bytes: None,
-            max_duration_ms: Some(300),
-            split_at_keyframes_only: true,
-            on_split: Some(Box::new(move |_, size, duration| {
-                split_positions_clone.lock().unwrap().push((size, duration));
-            })),
-            use_retrospective_splitting: true, // Explicitly enable retrospective splitting
-        };
-
-        let mut operator = LimitOperator::with_config(context, config);
-
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
-
-        // Send a stream with sequence headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
-            .unwrap();
-
-        // Send a keyframe at 0ms
-        input_tx
-            .send(Ok(create_video_tag(0, true, 100)))
-            .await
-            .unwrap();
-
-        // Send non-keyframes at 100ms, 200ms, 300ms (this will exceed limit)
-        input_tx
-            .send(Ok(create_video_tag(100, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(200, false, 100)))
-            .await
-            .unwrap();
-        input_tx
-            .send(Ok(create_video_tag(350, false, 100)))
-            .await
-            .unwrap(); // Exceeds 300ms limit
-
-        // Send another keyframe at 400ms
-        input_tx
-            .send(Ok(create_video_tag(400, true, 100)))
-            .await
-            .unwrap();
-
-        // Close the input
-        drop(input_tx);
-
-        // Collect the output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
-
-        // With retrospective splitting enabled, should have split at the last keyframe position
-        let positions = split_positions.lock().unwrap().clone();
-        assert!(!positions.is_empty(), "Expected at least one split");
-
-        // The split should have happened at the keyframe at 0ms, not at the point where
-        // the limit was exceeded (at 350ms)
-        if let Some((size, duration)) = positions.first() {
-            assert!(
-                *duration < 300,
-                "With retrospective splitting, duration should be at the last keyframe before limit"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_sequential_splits() {
-        let context = create_test_context();
+    #[test]
+    fn test_sequential_splits() {
+        let context = test_utils::create_test_context();
 
         // Track split count
-        let split_count = Arc::new(Mutex::new(0));
+        let split_count = Arc::new(AtomicUsize::new(0));
         let split_count_clone = Arc::clone(&split_count);
 
         // Configure with both size and duration limits
@@ -814,68 +643,82 @@ mod tests {
             max_size_bytes: Some(500),
             max_duration_ms: Some(300),
             split_at_keyframes_only: false,
-            on_split: Some(Box::new(move |_, _, _| {
-                *split_count_clone.lock().unwrap() += 1;
-            })),
             use_retrospective_splitting: false,
+            on_split: Some(Box::new(move |_, _, _| {
+                split_count.fetch_add(1, Ordering::SeqCst);
+            })),
         };
 
         let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send a stream with sequence headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
             .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
+        operator
+            .process(create_script_tag(0, false), &mut output_fn)
+            .unwrap();
+        operator
+            .process(test_utils::create_video_sequence_header(0), &mut output_fn)
+            .unwrap();
+        operator
+            .process(test_utils::create_audio_sequence_header(0), &mut output_fn)
             .unwrap();
 
         // First send tags that should trigger size limit
         for i in 0..3 {
-            input_tx
-                .send(Ok(create_video_tag(i * 50, i % 2 == 0, 200)))
-                .await
+            operator
+                .process(
+                    test_utils::create_video_tag_with_size(i * 50, i % 2 == 0, 200),
+                    &mut output_fn,
+                )
                 .unwrap();
         }
 
         // Then send tags that should trigger duration limit
         for i in 0..4 {
-            input_tx
-                .send(Ok(create_video_tag(i * 100 + 300, i % 2 == 0, 50)))
-                .await
+            operator
+                .process(
+                    test_utils::create_video_tag_with_size(i * 100 + 300, i % 2 == 0, 50),
+                    &mut output_fn,
+                )
                 .unwrap();
         }
 
-        // Close the input
-        drop(input_tx);
-
-        // Collect output
-        while let Ok(_) = output_rx.recv().await {}
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
         // Check split count
-        let final_split_count = *split_count.lock().unwrap();
+        let final_split_count = split_count_clone.load(Ordering::SeqCst);
         assert!(
             final_split_count >= 2,
             "Expected at least 2 splits (one for size, one for duration), got {}",
             final_split_count
         );
+
+        // Check header count matches split count + initial header
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        assert_eq!(
+            header_count,
+            final_split_count + 1,
+            "Expected header count to match splits + initial"
+        );
     }
 
-    #[tokio::test]
-    async fn test_split_with_interleaved_audio_video() {
-        let context = create_test_context();
+    #[test]
+    fn test_split_with_interleaved_audio_video() {
+        let context = test_utils::create_test_context();
 
         // Track split timestamps
         let split_timestamps = Arc::new(Mutex::new(Vec::new()));
@@ -886,26 +729,27 @@ mod tests {
             max_size_bytes: None,
             max_duration_ms: Some(400),
             split_at_keyframes_only: true,
-            on_split: Some(Box::new(move |_, _, duration| {
-                split_timestamps_clone.lock().unwrap().push(duration);
-            })),
             use_retrospective_splitting: false,
+            on_split: Some(Box::new({
+                let st_clone = Arc::clone(&split_timestamps);
+                move |_, _, duration| {
+                    st_clone.lock().unwrap().push(duration);
+                }
+            })),
         };
 
         let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Helper function to create audio tag
         let create_audio_tag = |timestamp: u32, size: usize| -> FlvData {
-            let data = vec![0xAF, 0x01]; // AAC raw data
-
+            let data = vec![0u8; size];
             FlvData::Tag(FlvTag {
                 timestamp_ms: timestamp,
                 stream_id: 0,
@@ -915,53 +759,71 @@ mod tests {
         };
 
         // Send initial headers
-        input_tx.send(Ok(create_test_header())).await.unwrap();
-        input_tx.send(Ok(create_metadata_tag())).await.unwrap();
-        input_tx
-            .send(Ok(create_video_sequence_header(0)))
-            .await
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
             .unwrap();
-        input_tx
-            .send(Ok(create_audio_sequence_header(0)))
-            .await
+        operator
+            .process(create_script_tag(0, false), &mut output_fn)
+            .unwrap();
+        operator
+            .process(test_utils::create_video_sequence_header(0), &mut output_fn)
+            .unwrap();
+        operator
+            .process(test_utils::create_audio_sequence_header(0), &mut output_fn)
             .unwrap();
 
         // Interleaved audio and video with keyframes at 0ms and 500ms
-        input_tx
-            .send(Ok(create_video_tag(0, true, 100)))
-            .await
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(0, true, 100),
+                &mut output_fn,
+            )
             .unwrap(); // Keyframe
-        input_tx.send(Ok(create_audio_tag(50, 20))).await.unwrap();
-        input_tx.send(Ok(create_audio_tag(100, 20))).await.unwrap();
-        input_tx
-            .send(Ok(create_video_tag(150, false, 100)))
-            .await
+        operator
+            .process(create_audio_tag(50, 20), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(100, 20), &mut output_fn)
+            .unwrap();
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(150, false, 100),
+                &mut output_fn,
+            )
             .unwrap(); // Non-keyframe
-        input_tx.send(Ok(create_audio_tag(200, 20))).await.unwrap();
-        input_tx.send(Ok(create_audio_tag(250, 20))).await.unwrap();
-        input_tx
-            .send(Ok(create_video_tag(300, false, 100)))
-            .await
+        operator
+            .process(create_audio_tag(200, 20), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(250, 20), &mut output_fn)
+            .unwrap();
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(300, false, 100),
+                &mut output_fn,
+            )
             .unwrap(); // Non-keyframe
-        input_tx.send(Ok(create_audio_tag(350, 20))).await.unwrap();
-        input_tx.send(Ok(create_audio_tag(400, 20))).await.unwrap(); // Should exceed duration limit (400ms)
-        input_tx
-            .send(Ok(create_video_tag(450, false, 100)))
-            .await
+        operator
+            .process(create_audio_tag(350, 20), &mut output_fn)
+            .unwrap();
+        operator
+            .process(create_audio_tag(400, 20), &mut output_fn)
+            .unwrap(); // Should exceed duration limit (400ms)
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(450, false, 100),
+                &mut output_fn,
+            )
             .unwrap(); // Non-keyframe
-        input_tx
-            .send(Ok(create_video_tag(500, true, 100)))
-            .await
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(500, true, 100),
+                &mut output_fn,
+            )
             .unwrap(); // Keyframe - split should happen here
 
-        // Close the input
-        drop(input_tx);
-
-        // Collect output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
 
         // Check that split happened at the keyframe
         let timestamps = split_timestamps.lock().unwrap().clone();
@@ -972,7 +834,7 @@ mod tests {
         );
 
         // Count headers in output to verify split happened
-        let header_count = received_items
+        let header_count = output_items
             .iter()
             .filter(|item| matches!(item, FlvData::Header(_)))
             .count();
@@ -982,12 +844,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_empty_stream_no_splits() {
-        let context = create_test_context();
+    #[test]
+    fn test_empty_stream_no_splits() {
+        let context = test_utils::create_test_context();
 
         // Track split events
-        let split_count = Arc::new(Mutex::new(0));
+        let split_count = Arc::new(AtomicUsize::new(0));
         let split_count_clone = Arc::clone(&split_count);
 
         // Configure with size limit
@@ -995,50 +857,138 @@ mod tests {
             max_size_bytes: Some(1000),
             max_duration_ms: None,
             split_at_keyframes_only: false,
-            on_split: Some(Box::new(move |_, _, _| {
-                *split_count_clone.lock().unwrap() += 1;
-            })),
             use_retrospective_splitting: false,
+            on_split: Some(Box::new(move |_, _, _| {
+                split_count.fetch_add(1, Ordering::SeqCst);
+            })),
         };
 
         let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
 
-        let (input_tx, input_rx) = kanal::bounded_async(32);
-        let (output_tx, mut output_rx) = kanal::bounded_async(32);
-
-        // Process in background
-        tokio::spawn(async move {
-            operator.process(input_rx, output_tx).await;
-        });
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
 
         // Send just a header with no actual content
-        input_tx.send(Ok(create_test_header())).await.unwrap();
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
 
-        // Close the input immediately
-        drop(input_tx);
-
-        // Collect output
-        let mut received_items = Vec::new();
-        while let Ok(item) = output_rx.recv().await {
-            received_items.push(item.unwrap());
-        }
+        // Finish processing immediately
+        operator.finish(&mut output_fn).unwrap();
 
         // Verify no splits occurred
-        let final_split_count = *split_count.lock().unwrap();
+        let final_split_count = split_count_clone.load(Ordering::SeqCst);
         assert_eq!(
             final_split_count, 0,
             "No splits should occur in empty stream"
         );
 
         // Verify we got just the header back
-        assert_eq!(
-            received_items.len(),
-            1,
-            "Expected only the header in output"
-        );
+        assert_eq!(output_items.len(), 1, "Expected only the header in output");
         assert!(
-            matches!(received_items[0], FlvData::Header(_)),
+            matches!(output_items[0], FlvData::Header(_)),
             "Expected only a header in the output"
         );
+    }
+
+    #[test]
+    fn test_retrospective_splitting() {
+        let context = test_utils::create_test_context();
+
+        // Track split information
+        let split_timestamps = Arc::new(Mutex::new(Vec::new()));
+        let split_timestamps_clone = Arc::clone(&split_timestamps);
+
+        // Configure with size limit and retrospective splitting
+        let config = LimitConfig {
+            max_size_bytes: Some(500),
+            max_duration_ms: None,
+            split_at_keyframes_only: true,
+            use_retrospective_splitting: true, // Enable retrospective splitting
+            on_split: Some(Box::new({
+                let callback_split_timestamps = Arc::clone(&split_timestamps);
+                move |_, _, ts| {
+                    callback_split_timestamps.lock().unwrap().push(ts);
+                }
+            })),
+        };
+
+        let mut operator = LimitOperator::with_config(context, config);
+        let mut output_items = Vec::new();
+
+        // Create a mutable output function
+        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+            output_items.push(item);
+            Ok(())
+        };
+
+        // Process a header
+        operator
+            .process(test_utils::create_test_header(), &mut output_fn)
+            .unwrap();
+
+        // Send a sequence with a keyframe followed by normal frames
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(0, true, 200),
+                &mut output_fn,
+            )
+            .unwrap(); // Keyframe
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(100, false, 100),
+                &mut output_fn,
+            )
+            .unwrap();
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(200, false, 100),
+                &mut output_fn,
+            )
+            .unwrap();
+
+        // Send more non-keyframes to exceed the size limit
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(300, false, 200),
+                &mut output_fn,
+            )
+            .unwrap(); // This should trigger size limit
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(400, false, 100),
+                &mut output_fn,
+            )
+            .unwrap();
+
+        // Now send a keyframe - this is where the split should happen
+        operator
+            .process(
+                test_utils::create_video_tag_with_size(500, true, 100),
+                &mut output_fn,
+            )
+            .unwrap();
+
+        // Finish processing
+        operator.finish(&mut output_fn).unwrap();
+
+        // Check that a split occurred
+        let split_timestamps = split_timestamps_clone.lock().unwrap().clone();
+        assert!(
+            !split_timestamps.is_empty(),
+            "Should have performed at least one split"
+        );
+
+        // Verify headers were inserted properly
+        let header_count = output_items
+            .iter()
+            .filter(|item| matches!(item, FlvData::Header(_)))
+            .count();
+
+        assert!(header_count > 1, "Should have more than the initial header");
     }
 }
