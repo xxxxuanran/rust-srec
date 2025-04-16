@@ -38,7 +38,7 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
+use crate::operators::{FlvOperator, FlvProcessor};
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::FlvUtil;
@@ -110,6 +110,7 @@ impl TimelineState {
 pub struct TimeConsistencyOperator {
     context: Arc<StreamerContext>,
     continuity_mode: ContinuityMode,
+    state: TimelineState,
 }
 
 impl TimeConsistencyOperator {
@@ -118,166 +119,142 @@ impl TimeConsistencyOperator {
         Self {
             context,
             continuity_mode,
+            state: TimelineState::new(),
         }
     }
 
     /// Calculate timestamp offset based on continuity mode and current state
-    fn calculate_timestamp_offset(&self, state: &mut TimelineState) {
-        if let (Some(last), Some(first)) = (state.last_timestamp, state.first_timestamp_in_segment)
-        {
+    fn calculate_timestamp_offset(&mut self) {
+        if let (Some(last), Some(first)) = (
+            self.state.last_timestamp,
+            self.state.first_timestamp_in_segment,
+        ) {
             match self.continuity_mode {
                 ContinuityMode::Continuous => {
                     // Make current segment continue from where the previous one ended
-                    state.timestamp_offset = last as i64 - first as i64;
+                    self.state.timestamp_offset = last as i64 - first as i64;
                     debug!(
                         "{} Maintaining continuous timeline: offset = {}ms",
-                        self.context.name, state.timestamp_offset
+                        self.context.name, self.state.timestamp_offset
                     );
                 }
                 ContinuityMode::Reset => {
                     // Reset timeline - this means applying a negative offset to bring timestamps to zero
-                    state.timestamp_offset = -(first as i64);
+                    self.state.timestamp_offset = -(first as i64);
                     debug!(
                         "{} Resetting timeline to zero: offset = {}ms",
-                        self.context.name, state.timestamp_offset
+                        self.context.name, self.state.timestamp_offset
                     );
                 }
             }
         }
-        state.needs_offset_calculation = false;
+        self.state.needs_offset_calculation = false;
     }
 }
 
-impl FlvOperator for TimeConsistencyOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
+impl FlvProcessor for TimeConsistencyOperator {
+    fn process(
+        &mut self,
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match input {
+            FlvData::Header(_) => {
+                // Headers indicate stream splits (except the first one)
+                if self.state.segment_count > 0 {
+                    debug!(
+                        "{} Detected stream split, preparing timestamp correction",
+                        self.context.name
+                    );
+                }
+                self.state.reset();
+
+                // Forward the header unmodified
+                output(input)
+            }
+            FlvData::Tag(mut tag) => {
+                let original_timestamp = tag.timestamp_ms;
+
+                // For normal media tags, handle timestamp adjustment
+                if self.state.new_segment {
+                    // For sequence headers, always set timestamp to 0
+                    if tag.is_video_sequence_header() || tag.is_audio_sequence_header() {
+                        // Save original timestamp for debugging
+                        let original = tag.timestamp_ms;
+                        if original != 0 {
+                            debug!(
+                                "{} Reset sequence header timestamp from {}ms to 0ms",
+                                self.context.name, original
+                            );
+                            // Set timestamp to 0
+                            tag.timestamp_ms = 0;
+                        }
+
+                        return output(FlvData::Tag(tag));
+                    } else if tag.is_script_tag() {
+                        // apply delta to script data tags
+                        if self.state.timestamp_offset != 0 {
+                            tag.timestamp_ms = 0;
+
+                            debug!(
+                                "{} Adjusted script data timestamp: {}ms -> {}ms",
+                                self.context.name, original_timestamp, 0
+                            );
+                        }
+                        return output(FlvData::Tag(tag));
+                    }
+
+                    if self.state.first_timestamp_in_segment.is_none() {
+                        // Record the first timestamp in this segment
+                        self.state.first_timestamp_in_segment = Some(tag.timestamp_ms);
+                        debug!(
+                            "{} First timestamp in segment {}: {}ms",
+                            self.context.name, self.state.segment_count, tag.timestamp_ms
+                        );
+
+                        if self.state.segment_count > 1 && self.state.needs_offset_calculation {
+                            self.calculate_timestamp_offset();
+                        } else if self.state.segment_count == 1
+                            && self.continuity_mode == ContinuityMode::Reset
+                        {
+                            // use the first timestamp as the delta
+                            self.state.timestamp_offset =
+                                -(self.state.first_timestamp_in_segment.unwrap() as i64);
+                        }
+                    }
+                    self.state.new_segment = false;
+                }
+
+                // Apply timestamp correction if needed
+                if self.state.timestamp_offset != 0 {
+                    // Calculate the corrected timestamp, ensure it doesn't go negative
+                    let corrected =
+                        max(0, tag.timestamp_ms as i64 + self.state.timestamp_offset) as u32;
+                    tag.timestamp_ms = corrected;
+
+                    trace!(
+                        "{} Adjusted timestamp: {}ms -> {}ms",
+                        self.context.name, original_timestamp, corrected
+                    );
+                }
+
+                // Remember the last timestamp we've seen
+                self.state.last_timestamp = Some(tag.timestamp_ms);
+
+                // Forward the tag with possibly adjusted timestamp
+                output(FlvData::Tag(tag))
+            }
+            // Forward other data types unmodified
+            _ => output(input),
+        }
     }
 
-    async fn process(
+    fn finish(
         &mut self,
-        input: Receiver<Result<FlvData, FlvError>>,
-        output: Sender<Result<FlvData, FlvError>>,
-    ) {
-        let mut state = TimelineState::new();
-
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(mut data) => {
-                    match &mut data {
-                        FlvData::Header(_) => {
-                            // Headers indicate stream splits (except the first one)
-                            if state.segment_count > 0 {
-                                debug!(
-                                    "{} Detected stream split, preparing timestamp correction",
-                                    self.context.name
-                                );
-                            }
-                            state.reset();
-
-                            // Forward the header unmodified
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        FlvData::Tag(tag) => {
-                            let original_timestamp = tag.timestamp_ms;
-
-                            // For normal media tags, handle timestamp adjustment
-                            if state.new_segment {
-                                // For sequence headers, always set timestamp to 0
-                                if tag.is_video_sequence_header() || tag.is_audio_sequence_header()
-                                {
-                                    // Save original timestamp for debugging
-                                    let original = tag.timestamp_ms;
-                                    if original != 0 {
-                                        debug!(
-                                            "{} Reset sequence header timestamp from {}ms to 0ms",
-                                            self.context.name, original
-                                        );
-                                        // Set timestamp to 0
-                                        tag.timestamp_ms = 0;
-                                    }
-
-                                    if output.send(Ok(data)).await.is_err() {
-                                        return;
-                                    }
-                                    continue;
-                                } else if tag.is_script_tag() {
-                                    // apply delta to script data tags
-                                    if state.timestamp_offset != 0 {
-                                        tag.timestamp_ms = 0;
-
-                                        debug!(
-                                            "{} Adjusted script data timestamp: {}ms -> {}ms",
-                                            self.context.name, original_timestamp, 0
-                                        );
-                                    }
-                                    if output.send(Ok(data)).await.is_err() {
-                                        return;
-                                    }
-                                    continue;
-                                }
-
-                                if state.first_timestamp_in_segment.is_none() {
-                                    // Record the first timestamp in this segment
-                                    state.first_timestamp_in_segment = Some(tag.timestamp_ms);
-                                    debug!(
-                                        "{} First timestamp in segment {}: {}ms",
-                                        self.context.name, state.segment_count, tag.timestamp_ms
-                                    );
-
-                                    if state.segment_count > 1 && state.needs_offset_calculation {
-                                        self.calculate_timestamp_offset(&mut state);
-                                    } else if state.segment_count == 1
-                                        && self.continuity_mode == ContinuityMode::Reset
-                                    {
-                                        // use the first timestamp as the delta
-                                        state.timestamp_offset =
-                                            -(state.first_timestamp_in_segment.unwrap() as i64);
-                                    }
-                                }
-                                state.new_segment = false;
-                            }
-
-                            // Apply timestamp correction if needed
-                            if state.timestamp_offset != 0 {
-                                // Calculate the corrected timestamp, ensure it doesn't go negative
-                                let corrected =
-                                    max(0, tag.timestamp_ms as i64 + state.timestamp_offset) as u32;
-                                tag.timestamp_ms = corrected;
-
-                                trace!(
-                                    "{} Adjusted timestamp: {}ms -> {}ms",
-                                    self.context.name, original_timestamp, corrected
-                                );
-                            }
-
-                            // Remember the last timestamp we've seen
-                            state.last_timestamp = Some(tag.timestamp_ms);
-
-                            // Forward the tag with possibly adjusted timestamp
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        // Forward other data types unmodified
-                        _ => {
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Forward error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         debug!("{} Time consistency operator completed", self.context.name);
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

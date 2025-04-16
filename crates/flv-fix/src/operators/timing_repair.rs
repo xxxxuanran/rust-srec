@@ -57,7 +57,7 @@ use std::f64;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use super::FlvOperator;
+use super::{FlvOperator, FlvProcessor};
 
 /// The tolerance for timestamp correction due to floating point conversion errors
 /// Since millisecond precision (1/1000 of a second) can't exactly represent many common frame rates
@@ -391,12 +391,17 @@ impl TimingState {
 pub struct TimingRepairOperator {
     context: Arc<StreamerContext>,
     config: TimingRepairConfig,
+    state: TimingState,
 }
 
 impl TimingRepairOperator {
     /// Create a new TimingRepairOperator with the specified configuration
     pub fn new(context: Arc<StreamerContext>, config: TimingRepairConfig) -> Self {
-        Self { context, config }
+        Self {
+            context,
+            state: TimingState::new(&config),
+            config,
+        }
     }
 
     /// Create a new TimingRepairOperator with default configuration
@@ -405,16 +410,19 @@ impl TimingRepairOperator {
             strategy,
             ..Default::default()
         };
-        Self { context, config }
+        Self {
+            context,
+            state: TimingState::new(&config),
+            config,
+        }
     }
 
     /// Handle script tag (metadata), update timing params, and forward the tag.
-    async fn handle_script_tag(
-        &self,
+    fn handle_script_tag(
+        &mut self,
         tag: &mut FlvTag,
-        state: &mut TimingState,
-        output: &AsyncSender<Result<FlvData, FlvError>>,
-    ) -> bool {
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         let mut cursor = std::io::Cursor::new(tag.data.clone());
         if let Ok(amf_data) = ScriptData::demux(&mut cursor) {
             if amf_data.name == "onMetaData" && !amf_data.data.is_empty() {
@@ -424,13 +432,13 @@ impl TimingRepairOperator {
                             .iter()
                             .map(|(k, v)| (k.to_string(), v.clone()))
                             .collect::<HashMap<String, Amf0Value>>();
-                        state.update_timing_params(&properties);
+                        self.state.update_timing_params(&properties);
                         if self.config.debug {
                             debug!(
                                 "{} TimingRepair: Updated timing params - video interval: {}ms, audio interval: {}ms",
                                 self.context.name,
-                                state.video_frame_interval,
-                                state.audio_sample_interval
+                                self.state.video_frame_interval,
+                                self.state.audio_sample_interval
                             );
                         }
                     }
@@ -481,13 +489,13 @@ impl TimingRepairOperator {
                                 properties
                                     .insert("audiosamplerate".to_string(), Amf0Value::Number(rate));
                             }
-                            state.update_timing_params(&properties);
+                            self.state.update_timing_params(&properties);
                             if self.config.debug {
                                 debug!(
                                     "{} TimingRepair: Updated timing params from StrictArray - video interval: {}ms, audio interval: {}ms",
                                     self.context.name,
-                                    state.video_frame_interval,
-                                    state.audio_sample_interval
+                                    self.state.video_frame_interval,
+                                    self.state.audio_sample_interval
                                 );
                             }
                         }
@@ -505,168 +513,139 @@ impl TimingRepairOperator {
             }
         }
         // Forward script tag
-        let send_result = output.send(Ok(FlvData::Tag(tag.clone()))).await;
-        send_result.is_ok()
+        output(FlvData::Tag(tag.clone()))
     }
 }
 
-impl FlvOperator for TimingRepairOperator {
+impl FlvProcessor for TimingRepairOperator {
     /// Process method that receives FLV data, corrects timing issues, and forwards the data
-    async fn process(
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        let mut state = TimingState::new(&self.config);
+        mut input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match &mut input {
+            FlvData::Header(_) => {
+                // Reset state when encountering a header
+                self.state.reset(&self.config);
 
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(mut data) => {
-                    match &mut data {
-                        FlvData::Header(_) => {
-                            // Reset state when encountering a header
-                            state.reset(&self.config);
-
-                            if self.config.debug {
-                                debug!(
-                                    "{} TimingRepair: Processing new segment",
-                                    self.context.name
-                                );
-                            }
-
-                            // Forward the header unmodified
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        FlvData::Tag(tag) => {
-                            state.tag_count += 1;
-                            let original_timestamp = tag.timestamp_ms;
-
-                            // Handle script tags (metadata)
-                            if tag.is_script_tag() {
-                                if !self.handle_script_tag(tag, &mut state, &output).await {
-                                    return;
-                                }
-                                continue;
-                            }
-
-                            // Check for timestamp issues
-                            let mut need_correction = false;
-
-                            // Check for timestamp rebounds
-                            if state.is_timestamp_rebounded(tag) {
-                                state.rebound_count += 1;
-                                let new_delta = state.calculate_delta_correction(tag);
-
-                                warn!(
-                                    "{} TimingRepair: Timestamp rebound detected: {}ms, last ts: {}ms,  would go back in time - applying correction delta: {}ms",
-                                    self.context.name,
-                                    tag.timestamp_ms,
-                                    state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
-                                    new_delta
-                                );
-
-                                state.delta = new_delta;
-                                need_correction = true;
-                            }
-                            // Check for discontinuities
-                            else if state.is_timestamp_discontinuous(tag, &self.config) {
-                                state.discontinuity_count += 1;
-                                let new_delta = state.calculate_delta_correction(tag);
-
-                                warn!(
-                                    "{} TimingRepair: Timestamp discontinuity detected: {}ms, last ts: {}ms, applying correction delta: {}ms",
-                                    self.context.name,
-                                    tag.timestamp_ms,
-                                    state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
-                                    new_delta
-                                );
-
-                                state.delta = new_delta;
-                                need_correction = true;
-                            }
-
-                            // Apply correction if needed
-                            if state.delta != 0 || need_correction {
-                                let corrected_timestamp = if tag.timestamp_ms as i64 + state.delta
-                                    < 0
-                                {
-                                    warn!(
-                                        "{} TimingRepair: Negative timestamp detected, applying frame-rate aware correction",
-                                        self.context.name
-                                    );
-                                    if let Some(last) = &state.last_tag {
-                                        if tag.is_video_tag() {
-                                            last.timestamp_ms + state.video_frame_interval
-                                        } else if tag.is_audio_tag() {
-                                            last.timestamp_ms + state.audio_sample_interval
-                                        } else {
-                                            last.timestamp_ms
-                                                + max(
-                                                    state.video_frame_interval,
-                                                    state.audio_sample_interval,
-                                                )
-                                        }
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    (tag.timestamp_ms as i64 + state.delta) as u32
-                                };
-
-                                tag.timestamp_ms = corrected_timestamp;
-                                state.correction_count += 1;
-
-                                if self.config.debug {
-                                    debug!(
-                                        "{} TimingRepair: Corrected timestamp: {}ms -> {}ms (delta: {}ms)",
-                                        self.context.name,
-                                        original_timestamp,
-                                        corrected_timestamp,
-                                        state.delta
-                                    );
-                                }
-                            }
-
-                            // Update state with this tag
-                            state.update_last_tags(tag);
-
-                            // Forward the tag with corrected timestamp
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        // Forward other data types unmodified
-                        _ => {
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+                if self.config.debug {
+                    debug!("{} TimingRepair: Processing new segment", self.context.name);
                 }
-                Err(e) => {
-                    // Forward error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
+
+                // Forward the header unmodified
+                output(input)
             }
-        }
+            FlvData::Tag(tag) => {
+                self.state.tag_count += 1;
+                let original_timestamp = tag.timestamp_ms;
 
-        // Log statistics when complete
+                // Handle script tags (metadata)
+                if tag.is_script_tag() {
+                    return self.handle_script_tag(tag, output);
+                }
+
+                // Check for timestamp issues
+                let mut need_correction = false;
+
+                // Check for timestamp rebounds
+                if self.state.is_timestamp_rebounded(tag) {
+                    self.state.rebound_count += 1;
+                    let new_delta = self.state.calculate_delta_correction(tag);
+
+                    warn!(
+                        "{} TimingRepair: Timestamp rebound detected: {}ms, last ts: {}ms,  would go back in time - applying correction delta: {}ms",
+                        self.context.name,
+                        tag.timestamp_ms,
+                        self.state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
+                        new_delta
+                    );
+
+                    self.state.delta = new_delta;
+                    need_correction = true;
+                }
+                // Check for discontinuities
+                else if self.state.is_timestamp_discontinuous(tag, &self.config) {
+                    self.state.discontinuity_count += 1;
+                    let new_delta = self.state.calculate_delta_correction(tag);
+
+                    warn!(
+                        "{} TimingRepair: Timestamp discontinuity detected: {}ms, last ts: {}ms, applying correction delta: {}ms",
+                        self.context.name,
+                        tag.timestamp_ms,
+                        self.state.last_tag.as_ref().map_or(0, |t| t.timestamp_ms),
+                        new_delta
+                    );
+
+                    self.state.delta = new_delta;
+                    need_correction = true;
+                }
+
+                // Apply correction if needed
+                if self.state.delta != 0 || need_correction {
+                    let corrected_timestamp = if tag.timestamp_ms as i64 + self.state.delta < 0 {
+                        warn!(
+                            "{} TimingRepair: Negative timestamp detected, applying frame-rate aware correction",
+                            self.context.name
+                        );
+                        if let Some(last) = &self.state.last_tag {
+                            if tag.is_video_tag() {
+                                last.timestamp_ms + self.state.video_frame_interval
+                            } else if tag.is_audio_tag() {
+                                last.timestamp_ms + self.state.audio_sample_interval
+                            } else {
+                                last.timestamp_ms
+                                    + max(
+                                        self.state.video_frame_interval,
+                                        self.state.audio_sample_interval,
+                                    )
+                            }
+                        } else {
+                            0
+                        }
+                    } else {
+                        (tag.timestamp_ms as i64 + self.state.delta) as u32
+                    };
+
+                    tag.timestamp_ms = corrected_timestamp;
+                    self.state.correction_count += 1;
+
+                    if self.config.debug {
+                        debug!(
+                            "{} TimingRepair: Corrected timestamp: {}ms -> {}ms (delta: {}ms)",
+                            self.context.name,
+                            original_timestamp,
+                            corrected_timestamp,
+                            self.state.delta
+                        );
+                    }
+                }
+
+                // Update state with this tag
+                self.state.update_last_tags(tag);
+
+                // Forward the tag with corrected timestamp
+                output(input)
+            }
+            // Forward other data types unmodified
+            _ => output(input),
+        }
+    }
+
+    fn finish(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        // Finalize processing and log statistics
         info!(
             "{} TimingRepair complete: Processed {} tags, applied {} corrections, detected {} rebounds and {} discontinuities",
             self.context.name,
-            state.tag_count,
-            state.correction_count,
-            state.rebound_count,
-            state.discontinuity_count
+            self.state.tag_count,
+            self.state.correction_count,
+            self.state.rebound_count,
+            self.state.discontinuity_count
         );
-    }
-
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

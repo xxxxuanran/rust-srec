@@ -28,7 +28,7 @@
 //! - hua0512
 //!
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
+use crate::operators::{FlvOperator, FlvProcessor};
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::{FlvTag, FlvUtil};
@@ -55,9 +55,12 @@ impl GopSortOperator {
 
     /// Process buffered tags and emit them in properly sorted order
     /// This follows the Kotlin implementation's sorting logic
-    async fn push_tags(&mut self, output: &AsyncSender<Result<FlvData, FlvError>>) -> bool {
+    fn push_tags(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         if self.gop_tags.is_empty() {
-            return true;
+            return Ok(());
         }
 
         trace!("{} GOP tags: {}", self.context.name, self.gop_tags.len());
@@ -86,9 +89,7 @@ impl GopSortOperator {
                 // Emit script tag first if present
                 if let Some(script_pos) = script_pos {
                     let script_tag = self.gop_tags.remove(script_pos);
-                    if output.send(Ok(FlvData::Tag(script_tag))).await.is_err() {
-                        return false;
-                    }
+                    output(FlvData::Tag(script_tag))?;
                 }
 
                 // Adjust indices for video header after possible script tag removal
@@ -100,9 +101,7 @@ impl GopSortOperator {
 
                 // Emit video sequence header
                 let avc_tag = self.gop_tags.remove(avc_idx);
-                if output.send(Ok(FlvData::Tag(avc_tag))).await.is_err() {
-                    return false;
-                }
+                output(FlvData::Tag(avc_tag))?;
 
                 // Adjust indices for audio header after script and video header removal
                 let aac_idx = if script_pos.is_some() && aac_pos > script_pos.unwrap() {
@@ -122,13 +121,11 @@ impl GopSortOperator {
                     "{} Emitting audio sequence header: {:?}",
                     self.context.name, aac_tag
                 );
-                if output.send(Ok(FlvData::Tag(aac_tag))).await.is_err() {
-                    return false;
-                }
+                output(FlvData::Tag(aac_tag))?;
 
                 // Clear the buffer since we've handled the important tags
                 self.gop_tags.clear();
-                return true;
+                return Ok(());
             }
         }
 
@@ -183,89 +180,61 @@ impl GopSortOperator {
 
         // Emit script tags in original order (no sorting)
         for tag in script_tags {
-            if output.send(Ok(FlvData::Tag(tag))).await.is_err() {
-                return false;
-            }
+            output(FlvData::Tag(tag))?;
         }
 
         // Emit the sorted tags
         for tag in sorted_tags {
-            if output.send(Ok(FlvData::Tag(tag))).await.is_err() {
-                return false;
-            }
+            output(FlvData::Tag(tag))?;
         }
 
-        true
+        Ok(())
     }
 }
 
-impl FlvOperator for GopSortOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for GopSortOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    match &data {
-                        FlvData::Header(_) | FlvData::EndOfSequence(_) => {
-                            // Process any buffered tags first
-                            if !self.push_tags(&output).await {
-                                return;
-                            }
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match input {
+            FlvData::Header(_) | FlvData::EndOfSequence(_) => {
+                // Process any buffered tags first
+                self.push_tags(output)?;
 
-                            // Forward the header or EOS
-                            // do not send end of stream to output
-                            if data.is_end_of_sequence() {
-                                debug!("{} End of stream...", self.context.name);
-                                return;
-                            }
-
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-
-                            debug!("{} Reset GOP tags...", self.context.name);
-                        }
-                        FlvData::Tag(tag) => {
-                            let tag = tag.clone();
-
-                            // Check for a nalu keyframe
-                            if tag.is_key_frame_nalu() {
-                                // On keyframe, process buffered tags
-                                if !self.push_tags(&output).await {
-                                    return;
-                                }
-                                // Start the new buffer with this keyframe
-                                self.gop_tags.push(tag);
-                            } else {
-                                // Just add non-keyframe to buffer
-                                self.gop_tags.push(tag);
-                            }
-                        }
-                    }
+                // Forward the header or EOS
+                // do not send end of stream to output
+                if input.is_end_of_sequence() {
+                    debug!("{} End of stream...", self.context.name);
+                    return Ok(());
                 }
-                Err(e) => {
-                    // Push any buffered tags before forwarding the error
-                    self.push_tags(&output).await;
 
-                    // Forward the error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
+                output(input)?;
+                debug!("{} Reset GOP tags...", self.context.name);
+            }
+            FlvData::Tag(tag) => {
+                // Check for a nalu keyframe
+                if tag.is_key_frame_nalu() {
+                    // On keyframe, process buffered tags
+                    self.push_tags(output)?;
+                    // Start the new buffer with this keyframe
                 }
+                // Just add non-keyframe to buffer
+                self.gop_tags.push(tag);
             }
         }
+        Ok(())
+    }
 
+    fn finish(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         // Process any remaining buffered tags at end of stream
-        self.push_tags(&output).await;
-
+        self.push_tags(output)?;
         info!("{} GOP sort completed", self.context.name);
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

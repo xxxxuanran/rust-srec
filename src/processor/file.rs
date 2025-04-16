@@ -57,13 +57,15 @@ pub async fn process_file(
         .to_string();
     pb_manager.add_file_progress(&file_name);
 
-    let decoder_stream = FlvDecoderStream::with_capacity(
+    let mut decoder_stream = FlvDecoderStream::with_capacity(
         file_reader,
-        32 * 1024, // Input buffer capacity
+        1024 * 1024, // Input buffer capacity
     );
 
     // Create the input stream
-    let input_stream: BoxStream<FlvData> = decoder_stream.boxed();
+    let (sender, mut receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+
+    let mut process_task = None;
 
     let mut processed_stream = if enable_processing {
         // Processing mode: run through the processing pipeline
@@ -76,7 +78,27 @@ pub async fn process_file(
         // Create streamer context and pipeline
         let context = StreamerContext::default();
         let pipeline = FlvPipeline::with_config(context, config);
-        pipeline.process(input_stream)
+
+        let (output_tx, mut output_rx) =
+            std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+
+        process_task = Some(tokio::task::spawn_blocking(move || {
+            let nflv = pipeline.process();
+
+            let input = std::iter::from_fn(|| {
+                // 读取输入流
+                // let input = .unwrap();
+
+                return receiver.recv().map(|v| Some(v)).unwrap_or(None);
+            });
+
+            let mut output = |result: Result<FlvData, FlvError>| {
+                // 处理输出
+                output_tx.send(result).unwrap();
+            };
+            nflv.process(input, &mut output).unwrap();
+        }));
+        output_rx
     } else {
         // Raw mode: bypass the pipeline entirely
         info!(
@@ -84,27 +106,8 @@ pub async fn process_file(
             "Processing pipeline disabled, outputting raw data"
         );
         pb_manager.set_status("Processing without optimizations");
-        input_stream
+        receiver
     };
-
-    let (sender, receiver) = mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
-
-    // Create reader task
-    let reader_handle = tokio::spawn(async move {
-        let mut bytes_processed = 0;
-        while let Some(result) = processed_stream.next().await {
-            // Estimate progress based on tag sizes
-            if let Ok(data) = &result {
-                match data {
-                    FlvData::Header(_) => bytes_processed += 9, // FLV header size
-                    FlvData::Tag(tag) => bytes_processed += tag.data.len() as u64 + 11, // Tag data + header
-                    FlvData::EndOfSequence(bytes) => bytes_processed += bytes.len() as u64, // End of sequence size
-                }
-            }
-            sender.send(result).unwrap();
-        }
-        bytes_processed
-    });
 
     let output_dir = output_dir.to_path_buf();
 
@@ -118,7 +121,7 @@ pub async fn process_file(
         // Set up progress bar callbacks
         progress_clone.setup_writer_task_callbacks(&mut writer_task);
 
-        writer_task.run(receiver)?;
+        writer_task.run(processed_stream)?;
 
         Ok::<_, WriterError>((
             writer_task.total_tags_written(),
@@ -127,8 +130,25 @@ pub async fn process_file(
     });
 
     // Wait for both tasks to complete
-    let bytes_processed = reader_handle.await?;
+    // let bytes_processed = reader_handle.await?;
+    let bytes_processed = 1000;
+
+  
+    while let Some(result) = decoder_stream.next().await {
+        sender.send(result).unwrap()
+    }
+    drop(sender); // Close the channel to signal completion
+    
+    info!(
+        path = %input_path.display(),
+        "Finished processing input stream"
+    );
+    // reader_handle.await?;
     let (total_tags_written, files_created) = writer_handle.await??;
+
+    if let Some(p) = process_task {
+        p.await?;
+    }
 
     let elapsed = start_time.elapsed();
 

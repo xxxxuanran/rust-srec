@@ -38,8 +38,10 @@ use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use kanal::{AsyncReceiver, AsyncSender};
-use tracing::{debug, warn};
 use std::sync::Arc;
+use tracing::{debug, warn};
+
+use super::FlvProcessor;
 
 /// An operator that buffers and validates FLV stream fragments to ensure continuity and validity.
 ///
@@ -50,6 +52,8 @@ use std::sync::Arc;
 /// - Handling errors appropriately throughout the process
 pub struct DefragmentOperator {
     context: Arc<StreamerContext>,
+    is_gathering: bool,
+    buffer: Vec<FlvData>,
 }
 
 impl DefragmentOperator {
@@ -59,104 +63,94 @@ impl DefragmentOperator {
     ///
     /// * `context` - The shared StreamerContext containing configuration and state
     pub fn new(context: Arc<StreamerContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            is_gathering: false,
+            buffer: Vec::with_capacity(Self::MIN_TAGS_NUM),
+        }
+    }
+
+    const MIN_TAGS_NUM: usize = 10;
+
+    fn reset(&mut self) {
+        self.is_gathering = false;
+        self.buffer.clear();
     }
 }
 
-impl FlvOperator for DefragmentOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for DefragmentOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        const MIN_TAGS_NUM: usize = 10;
-        let mut is_gathering = false;
-        let mut buffer = Vec::with_capacity(MIN_TAGS_NUM);
-
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    if matches!(data, FlvData::Header(_)) {
-                        if !buffer.is_empty() {
-                            warn!(
-                                "{} Discarded {} items, total size: {}",
-                                self.context.name,
-                                buffer.len(),
-                                buffer.iter().map(|d: &FlvData| d.size()).sum::<usize>(),
-                            );
-                            buffer.clear();
-                        }
-                        is_gathering = true;
-                        debug!("{} Start gathering...", self.context.name);
-                    }
-
-                    if is_gathering {
-                        buffer.push(data);
-
-                        if buffer.len() >= MIN_TAGS_NUM {
-                            debug!(
-                                "{} Gathered {} items, total size: {}",
-                                self.context.name,
-                                buffer.len(),
-                                buffer.iter().map(|d| d.size()).sum::<usize>(),
-                            );
-
-                            // Emit all buffered items
-                            for tag in buffer.drain(..) {
-                                if output.send(Ok(tag)).await.is_err() {
-                                    return;
-                                }
-                            }
-
-                            is_gathering = false;
-
-                            debug!(
-                                "{} Not a fragmented sequence, stopped checking...",
-                                self.context.name,
-                            );
-                            // Reset buffer for next sequence
-                            buffer.clear();
-                        }
-                    } else {
-                        // Not gathering, emit immediately
-                        if output.send(Ok(data)).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Clear buffer and propagate error
-                    buffer.clear();
-                    is_gathering = false;
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        if matches!(input, FlvData::Header(_)) {
+            if !self.buffer.is_empty() {
+                warn!(
+                    "{} Discarded {} items, total size: {}",
+                    self.context.name,
+                    self.buffer.len(),
+                    self.buffer.iter().map(|d| d.size()).sum::<usize>(),
+                );
+                self.buffer.clear();
             }
+            self.is_gathering = true;
+            debug!("{} Start gathering...", self.context.name);
         }
 
-        // Handle any remaining data at end of stream
-        if !buffer.is_empty() {
-            if buffer.len() >= MIN_TAGS_NUM {
+        if self.is_gathering {
+            self.buffer.push(input);
+
+            if self.buffer.len() >= Self::MIN_TAGS_NUM {
+                debug!(
+                    "{} Gathered {} items, total size: {}",
+                    self.context.name,
+                    self.buffer.len(),
+                    self.buffer.iter().map(|d| d.size()).sum::<usize>(),
+                );
+
+                // Emit all buffered items
+                for tag in self.buffer.drain(..) {
+                    output(tag)?;
+                }
+
+                self.is_gathering = false;
+                debug!(
+                    "{} Not a fragmented sequence, stopped checking...",
+                    self.context.name
+                );
+                // Reset buffer for next sequence
+                self.buffer.clear();
+            }
+        } else {
+            // Not gathering, emit directly
+            output(input)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        // Handle remaining data at end of stream
+        if !self.buffer.is_empty() {
+            if self.buffer.len() >= Self::MIN_TAGS_NUM {
                 // If we have enough items, consider it valid
-                for tag in buffer {
-                    if output.send(Ok(tag)).await.is_err() {
-                        return;
-                    }
+                for tag in self.buffer.drain(..) {
+                    output(tag)?;
                 }
             } else {
                 // Not enough data, discard as fragmented
                 warn!(
                     "{} End of stream with only {} items in buffer, discarding",
                     self.context.name,
-                    buffer.len(),
+                    self.buffer.len(),
                 );
             }
         }
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

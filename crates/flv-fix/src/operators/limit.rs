@@ -43,6 +43,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 
+use super::FlvProcessor;
+
 /// Reason for a stream split
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitReason {
@@ -55,7 +57,7 @@ pub enum SplitReason {
 }
 
 /// Optional callback for when a stream split occurs
-pub type SplitCallback = Box<dyn Fn(SplitReason, u64, u32) + Send + Sync>;
+pub type SplitCallback = Box<dyn Fn(SplitReason, u64, u32)>;
 
 /// Configuration options for the limit operator
 pub struct LimitConfig {
@@ -204,7 +206,10 @@ impl LimitOperator {
         false
     }
 
-    async fn split_stream(&mut self, output: &AsyncSender<Result<FlvData, FlvError>>) -> bool {
+    fn split_stream(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         info!(
             "{} Splitting stream at size={} bytes, duration={}ms (segment #{})",
             self.context.name,
@@ -213,200 +218,154 @@ impl LimitOperator {
             self.state.split_count + 1
         );
 
-        // Helper macro to reduce repetition when sending tags with Arc
-        macro_rules! send_item {
-            ($item:expr, $transform:expr, $msg:expr) => {
-                if let Some(item) = &$item {
-                    debug!("{} {}", self.context.name, $msg);
-                    let data = $transform(item.clone());
-                    if output.send(Ok(data)).await.is_err() {
-                        return false;
-                    }
-                }
-            };
-        }
-
         // Send each item with Arc cloning instead of full data cloning
-        send_item!(
-            self.state.header,
-            |h: FlvHeader| FlvData::Header(h),
-            "re-emit header after split"
-        );
-        send_item!(
-            self.state.metadata,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit metadata after split"
-        );
-        send_item!(
-            self.state.video_sequence_tag,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit video sequence tag after split"
-        );
-        send_item!(
-            self.state.audio_sequence_tag,
-            |t: FlvTag| FlvData::Tag(t),
-            "re-emit audio sequence tag after split"
-        );
+        if let Some(header) = &self.state.header {
+            output(FlvData::Header(header.clone()))?;
+            debug!("{} {}", self.context.name, "re-emit header after split");
+        }
+        if let Some(metadata) = &self.state.metadata {
+            output(FlvData::Tag(metadata.clone()))?;
+            debug!("{} {}", self.context.name, "re-emit metadata after split");
+        }
+        if let Some(video_seq) = &self.state.video_sequence_tag {
+            output(FlvData::Tag(video_seq.clone()))?;
+            debug!(
+                "{} {}",
+                self.context.name, "re-emit video sequence tag after split"
+            );
+        }
+        if let Some(audio_seq) = &self.state.audio_sequence_tag {
+            output(FlvData::Tag(audio_seq.clone()))?;
+            debug!(
+                "{} {}",
+                self.context.name, "re-emit audio sequence tag after split"
+            );
+        }
 
         // Reset accumulated counters for the new segment
         self.state.reset_counters();
         self.last_split_time = Instant::now();
-
-        true
+        Ok(())
     }
 }
 
-impl FlvOperator for LimitOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for LimitOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    match &data {
-                        FlvData::Header(header) => {
-                            // Reset state for a new stream
-                            self.state = StreamState::new();
-                            self.state.header = Some(header.clone());
-                            self.last_split_time = Instant::now();
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match input {
+            FlvData::Header(header) => {
+                // Reset state for a new stream
+                self.state = StreamState::new();
+                self.state.header = Some(header.clone());
+                self.last_split_time = Instant::now();
 
-                            // Forward the header
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        FlvData::Tag(tag) => {
-                            // Update size counter
-                            let tag_size = tag.size() as u64;
-                            self.state.accumulated_size += tag_size;
+                // Forward the header
+                output(FlvData::Header(header))?;
+            }
+            FlvData::Tag(tag) => {
+                // Update size counter
+                let tag_size = tag.size() as u64;
+                self.state.accumulated_size += tag_size;
 
-                            // Update timestamp tracking
-                            if tag.timestamp_ms > self.state.max_timestamp {
-                                self.state.max_timestamp = tag.timestamp_ms;
-                            }
-
-                            // Track key metadata
-                            if tag.is_script_tag() {
-                                self.state.metadata = Some(tag.clone());
-                            } else if tag.is_video_sequence_header() {
-                                let mut tag = tag.clone();
-                                tag.timestamp_ms = 0; // Reset timestamp for video sequence header
-                                self.state.video_sequence_tag = Some(tag);
-                                debug!(
-                                    "{} Video sequence header detected, resetting timestamp.",
-                                    self.context.name
-                                );
-                            } else if tag.is_audio_sequence_header() {
-                                let mut tag = tag.clone();
-                                tag.timestamp_ms = 0; // Reset timestamp for audio sequence header
-                                self.state.audio_sequence_tag = Some(tag);
-                                debug!(
-                                    "{} Audio sequence header detected, resetting timestamp.",
-                                    self.context.name
-                                );
-                            } else if !self.state.first_content_tag_seen {
-                                // This is the first actual content tag (not sequence header or metadata)
-                                // Set the start timestamp to this tag's timestamp
-                                self.state.start_timestamp = tag.timestamp_ms;
-                                self.state.first_content_tag_seen = true;
-                                debug!(
-                                    "{} First content tag detected, setting start timestamp to {}ms.",
-                                    self.context.name, tag.timestamp_ms
-                                );
-                            }
-
-                            // Track keyframes for optimal split points
-                            if tag.is_key_frame_nalu() {
-                                self.state.last_keyframe_position =
-                                    Some((self.state.accumulated_size, self.state.max_timestamp));
-                            }
-
-                            // Check if any limit is exceeded
-                            let should_split = self.check_limits();
-
-                            // Inside the process method where split decisions are made
-                            if should_split
-                                && (!self.config.split_at_keyframes_only || tag.is_key_frame_nalu())
-                            {
-                                // Direct splitting - no retrospective logic
-                                let split_reason = self.determine_split_reason();
-
-                                // Report the split with current stats
-                                if let Some(callback) = &self.config.on_split {
-                                    let duration = self.state.current_duration();
-                                    (callback)(split_reason, self.state.accumulated_size, duration);
-                                }
-
-                                // Perform the split
-                                if !self.split_stream(&output).await {
-                                    return;
-                                }
-
-                                // Emit current tag after the split if it's a keyframe
-                                if tag.is_key_frame_nalu() || !self.config.split_at_keyframes_only {
-                                    #[allow(clippy::collapsible_if)]
-                                    if output.send(Ok(data.clone())).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            } else if should_split
-                                && self.config.split_at_keyframes_only
-                                && self.config.use_retrospective_splitting
-                                && self.state.last_keyframe_position.is_some()
-                            {
-                                // Retrospective splitting logic - only used if enabled
-                                let split_reason = self.determine_split_reason();
-
-                                // We're not at a keyframe but need to split at a keyframe
-                                // Emit this tag then trigger split
-                                if output.send(Ok(data.clone())).await.is_err() {
-                                    return;
-                                }
-
-                                if let Some((size, timestamp)) = self.state.last_keyframe_position {
-                                    // Use the position of the last keyframe for stats
-                                    if let Some(callback) = &self.config.on_split {
-                                        let duration =
-                                            timestamp.saturating_sub(self.state.start_timestamp);
-                                        (callback)(split_reason, size, duration);
-                                    }
-                                }
-
-                                // Perform the split
-                                if !self.split_stream(&output).await {
-                                    return;
-                                }
-                            } else {
-                                // No split needed, just forward the tag
-                                if output.send(Ok(data)).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        _ => {
-                            // Forward other data types
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+                // Update timestamp tracking
+                if tag.timestamp_ms > self.state.max_timestamp {
+                    self.state.max_timestamp = tag.timestamp_ms;
                 }
-                Err(e) => {
-                    // Forward errors
-                    if output.send(Err(e)).await.is_err() {
-                        return;
+
+                // Track key metadata
+                if tag.is_script_tag() {
+                    self.state.metadata = Some(tag.clone());
+                } else if tag.is_video_sequence_header() {
+                    let mut tag = tag.clone();
+                    tag.timestamp_ms = 0; // Reset timestamp for video sequence header
+                    self.state.video_sequence_tag = Some(tag);
+                } else if tag.is_audio_sequence_header() {
+                    let mut tag = tag.clone();
+                    tag.timestamp_ms = 0; // Reset timestamp for audio sequence header
+                    self.state.audio_sequence_tag = Some(tag);
+                } else if !self.state.first_content_tag_seen {
+                    // This is the first actual content tag (not sequence header or metadata)
+                    // Set the start timestamp to this tag's timestamp
+                    self.state.start_timestamp = tag.timestamp_ms;
+                    self.state.first_content_tag_seen = true;
+                    debug!(
+                        "{} First content tag detected, setting start timestamp to {}ms.",
+                        self.context.name, tag.timestamp_ms
+                    );
+                }
+
+                // Track keyframes for optimal split points
+                if tag.is_key_frame_nalu() {
+                    self.state.last_keyframe_position =
+                        Some((self.state.accumulated_size, self.state.max_timestamp));
+                }
+
+                // Check if any limit is exceeded
+                let should_split = self.check_limits();
+
+                // Inside the process method where split decisions are made
+                if should_split && (!self.config.split_at_keyframes_only || tag.is_key_frame_nalu())
+                {
+                    // Direct splitting - no retrospective logic
+                    let split_reason = self.determine_split_reason();
+
+                    // Report the split with current stats
+                    if let Some(callback) = &self.config.on_split {
+                        let duration = self.state.current_duration();
+                        (callback)(split_reason, self.state.accumulated_size, duration);
                     }
+
+                    // Perform the split
+                    self.split_stream(output)?;
+
+                    // Emit current tag after the split if it's a keyframe
+                    if tag.is_key_frame_nalu() || !self.config.split_at_keyframes_only {
+                        output(FlvData::Tag(tag))?;
+                    }
+                } else if should_split
+                    && self.config.split_at_keyframes_only
+                    && self.config.use_retrospective_splitting
+                    && self.state.last_keyframe_position.is_some()
+                {
+                    // Retrospective splitting logic - only used if enabled
+                    // let split_reason = self.determine_split_reason();
+
+                    // We're not at a keyframe but need to split at a keyframe
+                    // Emit this tag then trigger split
+                    output(FlvData::Tag(tag))?;
+
+                    if let Some((size, timestamp)) = self.state.last_keyframe_position {
+                        // Use the position of the last keyframe for stats
+                        if let Some(callback) = &self.config.on_split {
+                            let duration = timestamp.saturating_sub(self.state.start_timestamp);
+                            (callback)(self.determine_split_reason(), size, duration);
+                        }
+                    }
+
+                    // Perform the split
+                    self.split_stream(output)?;
+                } else {
+                    // No split needed, just forward the tag
+                    output(FlvData::Tag(tag))?;
                 }
             }
+            _ => {
+                // 转发其他数据类型
+                output(input)?;
+            }
         }
+        Ok(())
+    }
 
+    fn finish(
+        &mut self,
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         debug!("{} completed.", self.context.name);
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

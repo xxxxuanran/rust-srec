@@ -40,6 +40,8 @@ use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::warn;
 
+use super::FlvProcessor;
+
 /// An operator that validates and ensures FLV streams have a proper header.
 ///
 /// The HeaderCheckOperator inspects the beginning of a stream and inserts
@@ -47,6 +49,7 @@ use tracing::warn;
 /// processors by ensuring they always receive well-formed FLV data.
 pub struct HeaderCheckOperator {
     context: Arc<StreamerContext>,
+    first_item: bool,
 }
 
 impl HeaderCheckOperator {
@@ -56,60 +59,43 @@ impl HeaderCheckOperator {
     ///
     /// * `context` - The shared StreamerContext containing configuration and state
     pub fn new(context: Arc<StreamerContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            first_item: true,
+        }
     }
 }
 
-impl FlvOperator for HeaderCheckOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for HeaderCheckOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        let mut first_item = true;
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        if self.first_item {
+            self.first_item = false;
 
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    if first_item {
-                        first_item = false;
-
-                        // If the first item is not a header, insert a default one
-                        if !data.is_header() {
-                            warn!(
-                                "{} FLV header is missing, inserted a default header",
-                                self.context.name
-                            );
-                            // Send a default header
-                            let default_header = FlvHeader::new(true, true);
-                            if output
-                                .send(Ok(FlvData::Header(default_header)))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-
-                    // Forward the data
-                    if output.send(Ok(data)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    // Error handling - just forward the error
-                    first_item = false;
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
+            // If the first item is not a header, insert a default one
+            if !input.is_header() {
+                warn!(
+                    "{} FLV header is missing, inserted a default header",
+                    self.context.name
+                );
+                // Send a default header
+                let default_header = FlvHeader::new(true, true);
+                output(FlvData::Header(default_header))?;
             }
         }
+
+        // Forward the data
+        output(input)
+    }
+
+    fn finish(
+        &mut self,
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

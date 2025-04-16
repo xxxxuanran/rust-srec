@@ -26,8 +26,9 @@ use crate::operators::limit::LimitConfig;
 use crate::operators::script_filler::ScriptFillerConfig;
 use crate::operators::{
     ContinuityMode, DefragmentOperator, FlvOperator, GopSortOperator, HeaderCheckOperator,
-    LimitOperator, RepairStrategy, ScriptFilterOperator, ScriptKeyframesFillerOperator,
-    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator,
+    LimitOperator, NFlvPipeline, RepairStrategy, ScriptFilterOperator,
+    ScriptKeyframesFillerOperator, SplitOperator, TimeConsistencyOperator, TimingRepairConfig,
+    TimingRepairOperator,
 };
 use flv::data::FlvData;
 use flv::error::FlvError;
@@ -102,28 +103,11 @@ impl FlvPipeline {
     }
 
     /// Process an FLV stream through the complete processing pipeline
-    pub fn process(&self, input: BoxStream<FlvData>) -> BoxStream<FlvData> {
+    // pub fn process(&self, receiver: std::sync::mpsc::Receiver<Result<FlvData, FlvError>>) -> std::sync::mpsc::Receiver<Result<FlvData, FlvError>> {
+    pub fn process(&self) -> NFlvPipeline {
         let context = Arc::clone(&self.context);
         let config = self.config.clone();
 
-        // Create channels for all operators
-        let (defrag_tx, defrag_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (header_check_tx, header_check_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (gop_sort_tx, gop_sort_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (timing_repair_tx, timing_repair_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (split_tx, split_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (time_consistency_tx, time_consistency_rx) =
-            kanal::bounded_async(config.channel_buffer_size);
-        let (limit_tx, limit_rx) = kanal::bounded_async(config.channel_buffer_size);
-        let (script_filter_tx, script_filter_rx) = kanal::bounded_async(config.channel_buffer_size);
-
-        let (time_consistency_2_tx, time_consistency_2_rx) =
-            kanal::bounded_async(config.channel_buffer_size);
-        let (keyframe_index_tx, keyframe_index_rx) =
-            kanal::bounded_async(config.channel_buffer_size);
-        let (input_tx, input_rx) = kanal::bounded_async(config.channel_buffer_size);
-
-        // Create all operators
         let mut defrag_operator = DefragmentOperator::new(context.clone());
         let mut header_check_operator = HeaderCheckOperator::new(context.clone());
         let limit_config = LimitConfig {
@@ -144,7 +128,7 @@ impl FlvPipeline {
         let mut limit_operator = LimitOperator::with_config(context.clone(), limit_config);
         let mut gop_sort_operator = GopSortOperator::new(context.clone());
         let mut script_filter_operator = ScriptFilterOperator::new(context.clone());
-        let mut timing_repair_operator =
+        let timing_repair_operator =
             TimingRepairOperator::new(context.clone(), TimingRepairConfig::default());
         let mut split_operator = SplitOperator::new(context.clone());
         let mut time_consistency_operator =
@@ -157,87 +141,22 @@ impl FlvPipeline {
             ScriptKeyframesFillerOperator::new(context.clone(), keyframe_config)
         });
 
-        // Store all task handles
-        let mut task_handles: Vec<JoinHandle<()>> = Vec::with_capacity(11);
+        let pipeline = NFlvPipeline::new(context.clone())
+            .add_processor(defrag_operator)
+            .add_processor(header_check_operator)
+            .add_processor(split_operator)
+            .add_processor(gop_sort_operator)
+            .add_processor(time_consistency_operator)
+            .add_processor(timing_repair_operator)
+            .add_processor(limit_operator)
+            .add_processor(time_consistency_2_operator)
+            .add_processor(keyframe_index_operator.unwrap_or_else(|| {
+                ScriptKeyframesFillerOperator::new(context.clone(), ScriptFillerConfig::default())
+            }))
+            .add_processor(script_filter_operator);
+            // 添加其他操作符... 
 
-        // Input conversion task
-        task_handles.push(tokio::spawn(async move {
-            futures::pin_mut!(input);
-            while let Some(result) = input.next().await {
-                if input_tx.send(result).await.is_err() {
-                    break;
-                }
-            }
-        }));
-
-        // Processing pipeline tasks
-        task_handles.push(tokio::spawn(async move {
-            defrag_operator.process(input_rx, defrag_tx).await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            header_check_operator
-                .process(defrag_rx, header_check_tx)
-                .await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            split_operator.process(header_check_rx, split_tx).await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            gop_sort_operator.process(split_rx, gop_sort_tx).await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            time_consistency_operator
-                .process(gop_sort_rx, time_consistency_tx)
-                .await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            timing_repair_operator
-                .process(time_consistency_rx, timing_repair_tx)
-                .await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            limit_operator.process(timing_repair_rx, limit_tx).await;
-        }));
-        task_handles.push(tokio::spawn(async move {
-            time_consistency_2_operator
-                .process(limit_rx, time_consistency_2_tx)
-                .await;
-        }));
-
-        // Conditionally create ScriptKeyframesFillerOperator task based on configuration
-        if let Some(mut operator) = keyframe_index_operator {
-            task_handles.push(tokio::spawn(async move {
-                operator
-                    .process(time_consistency_2_rx, keyframe_index_tx)
-                    .await;
-            }));
-
-            // Script filter is the last operator in the pipeline
-            task_handles.push(tokio::spawn(async move {
-                script_filter_operator
-                    .process(keyframe_index_rx, script_filter_tx)
-                    .await;
-            }));
-        } else {
-            // If ScriptKeyframesFillerOperator is disabled, connect time_consistency_2 directly to script_filter
-            task_handles.push(tokio::spawn(async move {
-                script_filter_operator
-                    .process(time_consistency_2_rx, script_filter_tx)
-                    .await;
-            }));
-        }
-
-        let output_stream = async_stream::stream! {
-            while let Ok(result) = script_filter_rx.recv().await {
-                match result {
-                    Ok(data) => yield Ok(data),
-                    Err(e) => yield Err(e),
-                }
-            }
-            // Channel closed when while loop exits
-        };
-
-        Box::pin(output_stream)
+        pipeline
     }
 }
 

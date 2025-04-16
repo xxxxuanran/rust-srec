@@ -46,7 +46,7 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
+use crate::operators::{FlvOperator, FlvProcessor};
 use amf0::{Amf0Marker, Amf0Value, write_amf_property_key};
 use byteorder::{BigEndian, WriteBytesExt};
 use bytes::Bytes;
@@ -453,91 +453,58 @@ impl ScriptKeyframesFillerOperator {
     }
 }
 
-impl FlvOperator for ScriptKeyframesFillerOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for ScriptKeyframesFillerOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         debug!("{} Starting script modification process", self.context.name);
 
-        while let Ok(item_result) = input.recv().await {
-            match item_result {
-                Ok(data) => {
-                    match data {
-                        FlvData::Header(_) => {
-                            debug!("{} Received Header. Forwarding.", self.context.name);
-                            // reset flag
-                            self.seen_first_script_tag = false;
+        match input {
+            FlvData::Header(_) => {
+                debug!("{} Received Header. Forwarding.", self.context.name);
+                // reset flag
+                self.seen_first_script_tag = false;
 
-                            if output.send(Ok(data)).await.is_err() {
-                                return; // Output closed
-                            }
-                        }
-                        FlvData::Tag(tag) => {
-                            if tag.tag_type == FlvTagType::ScriptData {
-                                if !self.seen_first_script_tag {
-                                    debug!(
-                                        "{} Found first script tag. Modifying.",
-                                        self.context.name
-                                    );
-                                    self.seen_first_script_tag = true;
+                output(input)
+            }
+            FlvData::Tag(tag) if tag.tag_type == FlvTagType::ScriptData => {
+                if !self.seen_first_script_tag {
+                    debug!("{} Found first script tag. Modifying.", self.context.name);
+                    self.seen_first_script_tag = true;
 
-                                    let tag_clone = tag.clone();
-                                    let inject_script =
-                                        self.add_keyframes_to_amf(tag_clone).unwrap();
-                                    if output.send(Ok(FlvData::Tag(inject_script))).await.is_err() {
-                                        return; // Output closed
-                                    }
-                                } else {
-                                    debug!(
-                                        "{} Found subsequent script tag. Forwarding.",
-                                        self.context.name
-                                    );
-                                    // Forward subsequent script tags without modification
-                                    if output.send(Ok(FlvData::Tag(tag))).await.is_err() {
-                                        return; // Output closed
-                                    }
-                                }
-                            } else {
-                                // Forward tags that are not script data
-                                if output.send(Ok(FlvData::Tag(tag))).await.is_err() {
-                                    debug!("Sending tag failed. Output closed.");
-                                    return;
-                                }
-                            }
-                        }
-                        // Handle other FlvData types if necessary
-                        _ => {
-                            trace!(
-                                "{} Received other data type. Forwarding.",
-                                self.context.name
-                            );
-                            if output.send(Ok(data)).await.is_err() {
-                                return; // Output closed
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Error receiving data: {:?}. Forwarding error.",
-                        self.context.name, e
+                    let inject_script = self.add_keyframes_to_amf(tag)?;
+                    output(FlvData::Tag(inject_script))
+                } else {
+                    debug!(
+                        "{} Found subsequent script tag. Forwarding.",
+                        self.context.name
                     );
-                    if output.send(Err(e)).await.is_err() {
-                        return; // Output closed
-                    }
+                    // Forward subsequent script tags without modification
+                    output(FlvData::Tag(tag))
                 }
             }
+            // Handle other FlvData types if necessary
+            _ => {
+                trace!(
+                    "{} Received other data type. Forwarding.",
+                    self.context.name
+                );
+                output(input)
+            }
         }
+    }
+
+    fn finish(
+        &mut self,
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         info!(
             "{} Script modification operator finished.",
             self.context.name
         );
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

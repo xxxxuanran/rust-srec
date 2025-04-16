@@ -42,6 +42,8 @@ use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::{debug, info};
 
+use super::FlvProcessor;
+
 // Store data wrapped in Arc for efficient cloning
 struct StreamState {
     header: Option<FlvHeader>,
@@ -79,191 +81,123 @@ impl StreamState {
 
 pub struct SplitOperator {
     context: Arc<StreamerContext>,
+    state: StreamState,
 }
 
 impl SplitOperator {
     pub fn new(context: Arc<StreamerContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            state: StreamState::new(),
+        }
     }
 
     /// Calculate CRC32 for a byte slice using crc32fast
     fn calculate_crc32(data: &[u8]) -> u32 {
         crc32fast::hash(data)
     }
+
+    // Split stream and reinject header+sequence data
+    fn split_stream(
+        &mut self,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        // Note on timestamp handling:
+        // When we split the stream, we re-inject the header and sequence information
+        // using the original timestamps from when they were first encountered.
+        // This maintains timestamp consistency within the stream segments
+        // but does not reset the timeline. Downstream components or players
+        // may need to handle potential timestamp discontinuities at split points.
+        if let Some(header) = &self.state.header {
+            output(FlvData::Header(header.clone()))?;
+        }
+        if let Some(metadata) = &self.state.metadata {
+            output(FlvData::Tag(metadata.clone()))?;
+        }
+        if let Some(video_seq) = &self.state.video_sequence_tag {
+            output(FlvData::Tag(video_seq.clone()))?;
+        }
+        if let Some(audio_seq) = &self.state.audio_sequence_tag {
+            output(FlvData::Tag(audio_seq.clone()))?;
+        }
+        self.state.changed = false;
+        info!("{} Stream split", self.context.name);
+        Ok(())
+    }
 }
 
-impl FlvOperator for SplitOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
+impl FlvProcessor for SplitOperator {
+    fn process(
+        &mut self,
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match &input {
+            FlvData::Header(header) => {
+                // Reset state when a new header is encountered
+                self.state.reset();
+                self.state.header = Some(header.clone());
+                output(input)
+            }
+            FlvData::Tag(tag) => {
+                // Process different tag types
+                if tag.is_script_tag() {
+                    debug!("{} Metadata detected", self.context.name);
+                    self.state.metadata = Some(tag.clone());
+                } else if tag.is_video_sequence_header() {
+                    debug!("{} Video sequence tag detected", self.context.name);
+
+                    // Calculate CRC for comparison
+                    let crc = Self::calculate_crc32(&tag.data);
+
+                    // Compare with cached CRC if available
+                    if let Some(prev_crc) = self.state.video_crc {
+                        if prev_crc != crc {
+                            info!(
+                                "{} Video sequence header changed (CRC: {:x} -> {:x}), marking for split",
+                                self.context.name, prev_crc, crc
+                            );
+                            self.state.changed = true;
+                        }
+                    }
+                    // Update sequence tag
+                    self.state.video_sequence_tag = Some(tag.clone());
+                    self.state.video_crc = Some(crc);
+                } else if tag.is_audio_sequence_header() {
+                    debug!("{} Audio sequence tag detected", self.context.name);
+
+                    let crc = Self::calculate_crc32(&tag.data);
+                    // Compare with cached CRC if available
+                    if let Some(prev_crc) = self.state.audio_crc {
+                        if prev_crc != crc {
+                            info!(
+                                "{} Audio parameters changed: {:x} -> {:x}",
+                                self.context.name, prev_crc, crc
+                            );
+                            self.state.changed = true;
+                        }
+                    }
+                    // Update sequence tag
+                    self.state.audio_sequence_tag = Some(tag.clone());
+                    self.state.audio_crc = Some(crc);
+                } else if self.state.changed {
+                    // If parameters have changed and this is a regular tag,
+                    // it's time to split the stream
+                    self.split_stream(output)?;
+                }
+                output(input)
+            }
+            _ => output(input),
+        }
     }
 
-    async fn process(
+    fn finish(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        let mut state = StreamState::new();
-
-        // Send header and cached tags to rebuild stream after split
-        async fn insert_header_and_tags(
-            context: &StreamerContext,
-            output: &kanal::AsyncSender<Result<FlvData, FlvError>>,
-            state: &StreamState,
-        ) -> bool {
-            // Helper macro to reduce repetition when sending tags
-            macro_rules! send_item {
-                ($item:expr, $transform:expr, $msg:expr) => {
-                    if let Some(item) = &$item {
-                        debug!("{} {}", context.name, $msg);
-                        let data = $transform(item.clone());
-                        if output.send(Ok(data)).await.is_err() {
-                            return false;
-                        }
-                    }
-                };
-            }
-
-            // Re-inject header and sequence tags
-            send_item!(
-                state.header,
-                |h: FlvHeader| FlvData::Header(h),
-                "re-emit header"
-            );
-            send_item!(
-                state.metadata,
-                |t: FlvTag| FlvData::Tag(t),
-                "re-emit metadata"
-            );
-            send_item!(
-                state.video_sequence_tag,
-                |t: FlvTag| FlvData::Tag(t),
-                "re-emit video sequence tag"
-            );
-            send_item!(
-                state.audio_sequence_tag,
-                |t: FlvTag| FlvData::Tag(t),
-                "re-emit audio sequence tag"
-            );
-
-            true
-        }
-
-        // Split stream and reinject header+sequence data
-        async fn split_stream(
-            context: &StreamerContext,
-            output: &kanal::AsyncSender<Result<FlvData, FlvError>>,
-            state: &mut StreamState,
-        ) -> bool {
-            debug!("{} Splitting stream...", context.name);
-
-            // Note on timestamp handling:
-            // When we split the stream, we re-inject the header and sequence information
-            // using the original timestamps from when they were first encountered.
-            // This maintains timestamp consistency within the stream segments
-            // but does not reset the timeline. Downstream components or players
-            // may need to handle potential timestamp discontinuities at split points.
-
-            let result = insert_header_and_tags(context, output, state).await;
-
-            if result {
-                state.changed = false;
-                info!("{} Stream split", context.name);
-            }
-            result
-        }
-
-        // Main processing loop
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    match &data {
-                        FlvData::Header(header) => {
-                            // Reset state when a new header is encountered
-                            state.reset();
-                            // Store header in Arc
-                            state.header = Some(header.clone());
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                            continue;
-                        }
-                        FlvData::Tag(tag) => {
-                            // Process different tag types
-                            if tag.is_script_tag() {
-                                debug!("{} Metadata detected", self.context.name);
-                                state.metadata = Some(tag.clone());
-                            } else if tag.is_video_sequence_header() {
-                                debug!("{} Video sequence tag detected", self.context.name);
-
-                                // Calculate CRC for comparison
-                                let crc = Self::calculate_crc32(&tag.data);
-
-                                // Compare with cached CRC if available
-                                if let Some(prev_crc) = state.video_crc {
-                                    if prev_crc != crc {
-                                        info!(
-                                            "{} Video sequence header changed (CRC: {:x} -> {:x}), marking for split",
-                                            self.context.name, prev_crc, crc
-                                        );
-                                        state.changed = true;
-                                    }
-                                }
-
-                                // Update sequence tag
-                                state.video_sequence_tag = Some(tag.clone());
-                                state.video_crc = Some(crc);
-                            } else if tag.is_audio_sequence_header() {
-                                debug!("{} Audio sequence tag detected", self.context.name);
-
-                                // Calculate CRC for comparison
-                                let crc = Self::calculate_crc32(&tag.data);
-
-                                // Compare with cached CRC if available
-                                if let Some(prev_crc) = state.audio_crc {
-                                    if prev_crc != crc {
-                                        info!(
-                                            "{} Audio parameters changed: {:x} -> {:x}",
-                                            self.context.name, prev_crc, crc
-                                        );
-                                        state.changed = true;
-                                    }
-                                }
-
-                                // Update sequence tag
-                                state.audio_sequence_tag = Some(tag.clone());
-                                state.audio_crc = Some(crc);
-                            } else if state.changed {
-                                // If parameters have changed and this is a regular tag,
-                                // it's time to split the stream
-                                if !split_stream(&self.context, &output, &mut state).await {
-                                    return;
-                                }
-                            }
-
-                            // Forward the tag
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        _ => {
-                            // Forward other data types
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Forward error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
         debug!("{} completed.", self.context.name);
-        state.reset(); // Reset state when processing is done
+        self.state.reset();
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

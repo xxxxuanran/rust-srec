@@ -29,107 +29,81 @@
 //!
 
 use crate::context::StreamerContext;
-use crate::operators::FlvOperator;
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::tag::FlvTagType;
-use kanal::{AsyncReceiver, AsyncSender};
 use std::sync::Arc;
 use tracing::{debug, info};
+
+use super::FlvProcessor;
 
 /// Operator that filters out script data tags except for the first one
 pub struct ScriptFilterOperator {
     context: Arc<StreamerContext>,
+    seen_script_tag: bool,
+    script_tag_count: u32,
 }
 
 impl ScriptFilterOperator {
     /// Create a new ScriptFilterOperator
     pub fn new(context: Arc<StreamerContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            seen_script_tag: false,
+            script_tag_count: 0,
+        }
     }
 }
 
-impl FlvOperator for ScriptFilterOperator {
-    fn context(&self) -> &Arc<StreamerContext> {
-        &self.context
-    }
-
-    async fn process(
+impl FlvProcessor for ScriptFilterOperator {
+    fn process(
         &mut self,
-        input: AsyncReceiver<Result<FlvData, FlvError>>,
-        output: AsyncSender<Result<FlvData, FlvError>>,
-    ) {
-        let mut seen_script_tag = false;
-        let mut script_tag_count = 0;
-
-        while let Ok(item) = input.recv().await {
-            match item {
-                Ok(data) => {
-                    match &data {
-                        FlvData::Header(_) => {
-                            debug!("{} Resetting script tag filter state", self.context.name);
-                            // Reset state on header
-                            seen_script_tag = false;
-                            script_tag_count = 0;
-
-                            // Forward the header
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                        FlvData::Tag(tag) => {
-                            // Check if this is a script tag
-                            if tag.tag_type == FlvTagType::ScriptData {
-                                script_tag_count += 1;
-
-                                if !seen_script_tag {
-                                    // First script tag, keep it and mark as seen
-                                    seen_script_tag = true;
-                                    debug!("{} Forwarding first script tag", self.context.name);
-                                    if output.send(Ok(data)).await.is_err() {
-                                        return;
-                                    }
-                                } else {
-                                    // Subsequent script tag, discard it
-                                    debug!(
-                                        "{} Discarding subsequent script tag #{}",
-                                        self.context.name, script_tag_count
-                                    );
-                                    // Skip sending this to output
-                                    continue;
-                                }
-                            } else {
-                                // Not a script tag, forward it
-                                if output.send(Ok(data)).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        // Forward other data types unmodified
-                        _ => {
-                            if output.send(Ok(data)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Forward error
-                    if output.send(Err(e)).await.is_err() {
-                        return;
-                    }
+        input: FlvData,
+        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        match input {
+            FlvData::Header(_) => {
+                debug!("{} Resetting script tag filter state", self.context.name);
+                // Reset state on header
+                self.seen_script_tag = false;
+                self.script_tag_count = 0;
+                // Forward the header
+                output(input)
+            } // Check if this is a script tag
+            FlvData::Tag(tag) if tag.tag_type == FlvTagType::ScriptData => {
+                self.script_tag_count += 1;
+                if !self.seen_script_tag {
+                    // First script tag, keep it and mark as seen
+                    self.seen_script_tag = true;
+                    debug!("{} Forwarding first script tag", self.context.name);
+                    output(FlvData::Tag(tag))
+                } else {
+                    // Subsequent script tag, discard it
+                    debug!(
+                        "{} Discarding subsequent script tag #{}",
+                        self.context.name, self.script_tag_count
+                    );
+                    // Skip sending this to output
+                    Ok(())
                 }
             }
+            _ => output(input), // Forward other data types unmodified
         }
+    }
 
-        if script_tag_count > 1 {
+    fn finish(
+        &mut self,
+        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
+    ) -> Result<(), FlvError> {
+        if self.script_tag_count > 1 {
             info!(
                 "{} Filtered out {} excess script tags",
                 self.context.name,
-                script_tag_count - 1
+                self.script_tag_count - 1
             );
         }
         debug!("{} Script filter operator completed", self.context.name);
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

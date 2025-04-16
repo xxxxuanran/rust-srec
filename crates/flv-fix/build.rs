@@ -7,6 +7,6 @@ fn main() -> std::io::Result<()> {
     if !test_data_path.exists() {
         fs::create_dir_all(test_data_path)?;
     }
-    
+
     Ok(())
 }

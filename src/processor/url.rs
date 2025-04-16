@@ -26,146 +26,146 @@ pub async fn process_url(
     name_template: Option<&str>,
     pb_manager: &mut ProgressManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let start_time = std::time::Instant::now();
-
-    // Create output directory if it doesn't exist
-    tokio::fs::create_dir_all(output_dir).await?;
-
-    // Parse the URL
-    let url = Url::parse(url_str)?;
-
-    // Get default base name from URL if no template is provided
-    let base_name = if let Some(template) = name_template {
-        // Use template with placeholder expansion
-        info!("Using custom filename template: {}", template);
-        expand_filename_template(template, Some(&url), None)
-    } else {
-        // Default behavior: extract from URL path
-        let file_name = url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .unwrap_or("download")
-            .to_string();
-
-        // Remove any file extension from the base name
-        match file_name.rfind('.') {
-            Some(pos) => file_name[..pos].to_string(),
-            None => file_name,
-        }
-    };
-
-    info!(url = %url_str, filename = %base_name, "Processing with output filename");
-
-    let downloader = FlvDownloader::with_config(download_config)?;
-
-    pb_manager.set_status(&format!("Processing URL: {}", url_str));
-
-    if !enable_processing {
-        // Raw mode: download without parsing through FlvDecoderStream
-        info!(
-            url = %url_str,
-            "Starting to download raw FLV stream (default mode)"
-        );
-
-        // Download the raw stream without parsing
-        let raw_byte_stream = downloader.download_raw(url_str).await?;
-
-        // Create a file writer for the raw data
-        let raw_output_path = output_dir.join(format!("{}.flv", base_name));
-        let file = tokio::fs::File::create(&raw_output_path).await?;
-
-        info!("Saving raw stream to {}", raw_output_path.display());
-
-        // Set up file progress bar
-        let filename = raw_output_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        pb_manager.add_file_progress(&filename);
-        pb_manager.set_status(&format!("Downloading {}", filename));
-
-        // Write the stream directly to the file with progress reporting
-        let bytes_written = write_raw_stream_to_file(raw_byte_stream, file, pb_manager).await?;
-
-        let elapsed = start_time.elapsed();
-
-        pb_manager.finish(&format!(
-            "Downloaded {} in {:?}",
-            HumanBytes(bytes_written),
-            elapsed
-        ));
-
-        info!(
-            url = %url_str,
-            output_file = %raw_output_path.display(),
-            bytes_written = bytes_written,
-            duration = ?elapsed,
-            "Raw download complete"
-        );
-    } else {
-        // Processing mode: download and process through the pipeline
-        pb_manager.set_status(&format!("Starting download from {}", url_str));
-
-        // Download the FLV stream
-        let input_stream = downloader.download(url_str).await?;
-
-        // Process through the pipeline
-        let context = StreamerContext::default();
-        let pipeline = FlvPipeline::with_config(context, config);
-        let mut processed_stream = pipeline.process(input_stream);
-
-        let (sender, receiver) = mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
-        // Create writer task and run it
-        let reader_handle = tokio::spawn(async move {
-            while let Some(result) = processed_stream.next().await {
-                sender.send(result).unwrap();
-            }
-        });
-
-        let output_dir = output_dir.to_path_buf();
-
-        // Add a file progress bar
-        pb_manager.add_file_progress(&base_name);
-
-        // Clone progress manager for the writer task
-        let progress_clone = pb_manager.clone();
-
-        // Create writer task and run it
-        let writer_handle = tokio::task::spawn_blocking(move || {
-            let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
-
-            // Set up progress bar callbacks
-            progress_clone.setup_writer_task_callbacks(&mut writer_task);
-
-            let result = writer_task.run(receiver);
-
-            result.map(|_| {
-                (
-                    writer_task.total_tags_written(),
-                    writer_task.files_created(),
-                )
-            })
-        });
-
-        reader_handle.await?;
-        let (total_tags_written, files_created) = writer_handle.await??;
-
-        let elapsed = start_time.elapsed();
-
-        // Finish all progress bars
-        pb_manager.finish(&format!(
-            "Processed {} tags into {} files in {:?}",
-            total_tags_written, files_created, elapsed
-        ));
-
-        info!(
-            url = %url_str,
-            duration = ?elapsed,
-            tags_processed = total_tags_written,
-            files_created = files_created,
-            "Download and processing complete"
-        );
-    }
+    // let start_time = std::time::Instant::now();
+    // 
+    // // Create output directory if it doesn't exist
+    // tokio::fs::create_dir_all(output_dir).await?;
+    // 
+    // // Parse the URL
+    // let url = Url::parse(url_str)?;
+    // 
+    // // Get default base name from URL if no template is provided
+    // let base_name = if let Some(template) = name_template {
+    //     // Use template with placeholder expansion
+    //     info!("Using custom filename template: {}", template);
+    //     expand_filename_template(template, Some(&url), None)
+    // } else {
+    //     // Default behavior: extract from URL path
+    //     let file_name = url
+    //         .path_segments()
+    //         .and_then(|mut segments| segments.next_back())
+    //         .unwrap_or("download")
+    //         .to_string();
+    // 
+    //     // Remove any file extension from the base name
+    //     match file_name.rfind('.') {
+    //         Some(pos) => file_name[..pos].to_string(),
+    //         None => file_name,
+    //     }
+    // };
+    // 
+    // info!(url = %url_str, filename = %base_name, "Processing with output filename");
+    // 
+    // let downloader = FlvDownloader::with_config(download_config)?;
+    // 
+    // pb_manager.set_status(&format!("Processing URL: {}", url_str));
+    // 
+    // if !enable_processing {
+    //     // Raw mode: download without parsing through FlvDecoderStream
+    //     info!(
+    //         url = %url_str,
+    //         "Starting to download raw FLV stream (default mode)"
+    //     );
+    // 
+    //     // Download the raw stream without parsing
+    //     let raw_byte_stream = downloader.download_raw(url_str).await?;
+    // 
+    //     // Create a file writer for the raw data
+    //     let raw_output_path = output_dir.join(format!("{}.flv", base_name));
+    //     let file = tokio::fs::File::create(&raw_output_path).await?;
+    // 
+    //     info!("Saving raw stream to {}", raw_output_path.display());
+    // 
+    //     // Set up file progress bar
+    //     let filename = raw_output_path
+    //         .file_name()
+    //         .unwrap_or_default()
+    //         .to_string_lossy();
+    //     pb_manager.add_file_progress(&filename);
+    //     pb_manager.set_status(&format!("Downloading {}", filename));
+    // 
+    //     // Write the stream directly to the file with progress reporting
+    //     let bytes_written = write_raw_stream_to_file(raw_byte_stream, file, pb_manager).await?;
+    // 
+    //     let elapsed = start_time.elapsed();
+    // 
+    //     pb_manager.finish(&format!(
+    //         "Downloaded {} in {:?}",
+    //         HumanBytes(bytes_written),
+    //         elapsed
+    //     ));
+    // 
+    //     info!(
+    //         url = %url_str,
+    //         output_file = %raw_output_path.display(),
+    //         bytes_written = bytes_written,
+    //         duration = ?elapsed,
+    //         "Raw download complete"
+    //     );
+    // } else {
+    //     // Processing mode: download and process through the pipeline
+    //     pb_manager.set_status(&format!("Starting download from {}", url_str));
+    // 
+    //     // Download the FLV stream
+    //     let input_stream = downloader.download(url_str).await?;
+    // 
+    //     // Process through the pipeline
+    //     let context = StreamerContext::default();
+    //     let pipeline = FlvPipeline::with_config(context, config);
+    //     let mut processed_stream = pipeline.process(input_stream);
+    // 
+    //     let (sender, receiver) = mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+    //     // Create writer task and run it
+    //     let reader_handle = tokio::spawn(async move {
+    //         while let Some(result) = processed_stream.next().await {
+    //             sender.send(result).unwrap();
+    //         }
+    //     });
+    // 
+    //     let output_dir = output_dir.to_path_buf();
+    // 
+    //     // Add a file progress bar
+    //     pb_manager.add_file_progress(&base_name);
+    // 
+    //     // Clone progress manager for the writer task
+    //     let progress_clone = pb_manager.clone();
+    // 
+    //     // Create writer task and run it
+    //     let writer_handle = tokio::task::spawn_blocking(move || {
+    //         let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
+    // 
+    //         // Set up progress bar callbacks
+    //         progress_clone.setup_writer_task_callbacks(&mut writer_task);
+    // 
+    //         let result = writer_task.run(receiver);
+    // 
+    //         result.map(|_| {
+    //             (
+    //                 writer_task.total_tags_written(),
+    //                 writer_task.files_created(),
+    //             )
+    //         })
+    //     });
+    // 
+    //     reader_handle.await?;
+    //     let (total_tags_written, files_created) = writer_handle.await??;
+    // 
+    //     let elapsed = start_time.elapsed();
+    // 
+    //     // Finish all progress bars
+    //     pb_manager.finish(&format!(
+    //         "Processed {} tags into {} files in {:?}",
+    //         total_tags_written, files_created, elapsed
+    //     ));
+    // 
+    //     info!(
+    //         url = %url_str,
+    //         duration = ?elapsed,
+    //         tags_processed = total_tags_written,
+    //         files_created = files_created,
+    //         "Download and processing complete"
+    //     );
+    // }
 
     Ok(())
 }

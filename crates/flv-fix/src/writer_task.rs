@@ -57,7 +57,7 @@ pub enum WriterError {
     #[error("Task Join Error: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("Writer state error: {0}")]
-    State(&'static str),
+    State(String),
     #[error("Script modifier error: {0}")]
     ScriptModifier(#[from] ScriptModifierError),
 }
@@ -247,7 +247,7 @@ impl FlvWriterTask {
                         None => {
                             // This should ideally not happen if handle_header was called first
                             Err(WriterError::State(
-                                "Attempted write_tag with no active writer",
+                                "Attempted write_tag with no active writer".to_string(),
                             ))
                         }
                     };
@@ -307,7 +307,7 @@ impl FlvWriterTask {
             // Return the original error wrapped in our WriterError
             return Err(match err.downcast::<flv::error::FlvError>() {
                 Ok(flv_err) => WriterError::Flv(*flv_err),
-                Err(err) => WriterError::State(Box::leak(err.to_string().into_boxed_str())),
+                Err(err) => WriterError::State(err.to_string()),
             });
         }
 
