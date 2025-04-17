@@ -57,6 +57,9 @@ pub struct PipelineConfig {
 
     /// Configuration for keyframe index injection
     pub keyframe_index_config: Option<ScriptFillerConfig>,
+
+    /// Channel buffer capacity for each stage of the pipeline
+    pub channel_buffer_size: usize,
 }
 
 impl Default for PipelineConfig {
@@ -68,6 +71,7 @@ impl Default for PipelineConfig {
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
             keyframe_index_config: Some(ScriptFillerConfig::default()),
+            channel_buffer_size: 16, // Default buffer size
         }
     }
 }

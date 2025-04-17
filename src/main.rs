@@ -92,6 +92,7 @@ async fn main() {
         } else {
             None
         },
+        channel_buffer_size: args.buffer_size,
     };
 
     // Determine output directory

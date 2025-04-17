@@ -71,6 +71,15 @@ pub struct CliArgs {
     )]
     pub enable_fix: bool,
 
+    /// Buffer size for processing channels
+    #[arg(
+        short = 'b',
+        long,
+        default_value = "16",
+        help = "Buffer size for internal processing channels"
+    )]
+    pub buffer_size: usize,
+
     /// Download buffer size
     #[arg(
         long,
