@@ -41,6 +41,14 @@ pub async fn process_inputs(
             inputs.len()
         );
 
+        // Update progress manager if it's not disabled
+        progress_manager.set_status(&format!(
+            "Processing input ({}/{}) - {}",
+            index + 1,
+            inputs.len(),
+            input
+        ));
+
         // Attempt to parse as a URL first
         if input.starts_with("http://") || input.starts_with("https://") {
             // It's a URL

@@ -75,13 +75,16 @@ pub async fn process_url(
 
         info!("Saving raw stream to {}", raw_output_path.display());
 
-        // Set up file progress bar
+        // Set up file progress bar if progress manager is enabled
         let filename = raw_output_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        pb_manager.add_file_progress(&filename);
-        pb_manager.set_status(&format!("Downloading {}", filename));
+            
+        if !pb_manager.is_disabled() {
+            pb_manager.add_file_progress(&filename);
+            pb_manager.set_status(&format!("Downloading {}", filename));
+        }
 
         // Write the stream directly to the file with progress reporting
         let bytes_written = write_raw_stream_to_file(raw_byte_stream, file, pb_manager).await?;
@@ -133,8 +136,10 @@ pub async fn process_url(
 
         let output_dir = output_dir.to_path_buf();
 
-        // Add a file progress bar
-        pb_manager.add_file_progress(&base_name);
+        // Add a file progress bar if progress manager is enabled
+        if !pb_manager.is_disabled() {
+            pb_manager.add_file_progress(&base_name);
+        }
 
         // Clone progress manager for the writer task
         let progress_clone = pb_manager.clone();
@@ -143,7 +148,7 @@ pub async fn process_url(
         let writer_handle = tokio::task::spawn_blocking(move || {
             let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
 
-            // Set up progress bar callbacks
+            // Set up progress bar callbacks if progress is enabled
             progress_clone.setup_writer_task_callbacks(&mut writer_task);
 
             let result = writer_task.run(output_rx);
@@ -209,18 +214,20 @@ async fn write_raw_stream_to_file(
                 writer.write_all(&bytes).await?;
                 total_bytes += bytes.len() as u64;
 
-                // Update the progress bar (but not too frequently)
-                let now = Instant::now();
-                if now.duration_since(last_update) > Duration::from_millis(100) {
-                    progress.update_main_progress(total_bytes);
+                // Update the progress bar (but not too frequently) if progress is enabled
+                if !progress.is_disabled() {
+                    let now = Instant::now();
+                    if now.duration_since(last_update) > Duration::from_millis(100) {
+                        progress.update_main_progress(total_bytes);
 
-                    // Get the current file progress bar (if any)
-                    if let Some(file_pb) = progress.get_file_progress() {
-                        file_pb.set_position(total_bytes);
-                        file_pb.set_length(total_bytes);
+                        // Get the current file progress bar (if any)
+                        if let Some(file_pb) = progress.get_file_progress() {
+                            file_pb.set_position(total_bytes);
+                            file_pb.set_length(total_bytes);
+                        }
+
+                        last_update = now;
                     }
-
-                    last_update = now;
                 }
             }
             Err(e) => return Err(Box::new(e)),

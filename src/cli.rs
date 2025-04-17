@@ -169,6 +169,15 @@ pub struct CliArgs {
     )]
     pub headers: Vec<String>,
 
+    /// Show progress bars for operations
+    #[arg(
+        short = 'P',
+        long = "progress",
+        default_value = "false",
+        help = "Show progress bars for download and processing operations"
+    )]
+    pub show_progress: bool,
+
     /// Disable all proxy settings for downloads
     #[arg(
         long,

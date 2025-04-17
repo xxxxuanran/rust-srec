@@ -45,16 +45,19 @@ pub async fn process_file(
     let file_reader = BufReader::new(file);
     let file_size = file_reader.get_ref().metadata().await?.len();
 
-    // Use provided progress manager or create a new one
-
+    // Update progress manager status if not disabled
     pb_manager.set_status(&format!("Processing {}", input_path.display()));
-    // Create a file-specific progress bar
+    
+    // Create a file-specific progress bar if progress manager is not disabled
     let file_name = input_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    pb_manager.add_file_progress(&file_name);
+        
+    if !pb_manager.is_disabled() {
+        pb_manager.add_file_progress(&file_name);
+    }
 
     let mut decoder_stream = FlvDecoderStream::with_capacity(
         file_reader,
@@ -125,20 +128,26 @@ pub async fn process_file(
         ))
     });
 
-    // Wait for both tasks to complete
-    // let bytes_processed = reader_handle.await?;
-    let bytes_processed = 1000;
+    // Process the FLV data
+    let mut bytes_processed = 0;
 
     while let Some(result) = decoder_stream.next().await {
+        // Update the processed bytes count if applicable
+        if let Ok(data) = &result {
+            bytes_processed += data.size() as u64;
+        }
+        
+        // Send the result to the processing pipeline
         sender.send(result).unwrap()
     }
+    
     drop(sender); // Close the channel to signal completion
 
     info!(
         path = %input_path.display(),
         "Finished processing input stream"
     );
-    // reader_handle.await?;
+    
     let (total_tags_written, files_created) = writer_handle.await??;
 
     if let Some(p) = process_task {

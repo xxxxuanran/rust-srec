@@ -98,10 +98,16 @@ async fn main() {
     // Determine output directory
     let output_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("./fix"));
 
-    // Create a global progress manager
-    // For multiple inputs, we don't know the total size in advance
-    let mut progress_manager = ProgressManager::new(None);
-    progress_manager.set_status("Initializing...");
+    // Create a progress manager based on show_progress flag
+    let mut progress_manager = if args.show_progress {
+        // Create an active progress manager
+        let manager = ProgressManager::new_with_mode(None, false);
+        manager.set_status("Initializing...");
+        manager
+    } else {
+        // Create a fully disabled progress manager (no UI elements created)
+        ProgressManager::disabled()
+    };
 
     // Handle proxy configuration
     let (proxy_config, _use_system_proxy) = if args.no_proxy {
