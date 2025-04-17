@@ -52,7 +52,7 @@ pub async fn process_inputs(
             status_buffer.clear();
             status_buffer.push_str("Processing input (");
             status_buffer.push_str(&input_index.to_string());
-            status_buffer.push_str("/");
+            status_buffer.push('/');
             status_buffer.push_str(&inputs_len.to_string());
             status_buffer.push_str(") - ");
             status_buffer.push_str(input);

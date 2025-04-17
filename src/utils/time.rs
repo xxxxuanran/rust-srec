@@ -24,7 +24,7 @@ pub fn parse_time(time_str: &str) -> Result<f64, ParseError> {
     }
 
     // If we didn't find any non-numeric characters, handle it as just a number
-    if split_index == 0 && time_str.len() > 0 {
+    if split_index == 0 && !time_str.is_empty() {
         // The entire string is numbers or decimal points
         return time_str
             .parse::<f64>()
