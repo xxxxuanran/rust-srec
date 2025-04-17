@@ -54,7 +54,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::f64;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::FlvProcessor;
 
@@ -93,9 +93,6 @@ pub struct TimingRepairConfig {
 
     /// Maximum allowed discontinuity in timestamps (ms)
     pub max_discontinuity: u32,
-
-    /// Enable verbose debugging output
-    pub debug: bool,
 }
 
 impl Default for TimingRepairConfig {
@@ -105,7 +102,6 @@ impl Default for TimingRepairConfig {
             default_frame_rate: 30.0,
             default_audio_rate: 44100.0,
             max_discontinuity: 1000, // 1 second
-            debug: true,
         }
     }
 }
@@ -433,35 +429,32 @@ impl TimingRepairOperator {
                             .map(|(k, v)| (k.to_string(), v.clone()))
                             .collect::<HashMap<String, Amf0Value>>();
                         self.state.update_timing_params(&properties);
-                        if self.config.debug {
-                            debug!(
-                                "{} TimingRepair: Updated timing params - video interval: {}ms, audio interval: {}ms",
-                                self.context.name,
-                                self.state.video_frame_interval,
-                                self.state.audio_sample_interval
-                            );
-                        }
+
+                        debug!(
+                            "{} TimingRepair: Updated timing params - video interval: {}ms, audio interval: {}ms",
+                            self.context.name,
+                            self.state.video_frame_interval,
+                            self.state.audio_sample_interval
+                        );
                     }
                     Amf0Value::StrictArray(items) => {
-                        if self.config.debug {
-                            debug!(
-                                "{} TimingRepair: Received metadata as StrictArray with {} items",
-                                self.context.name,
-                                items.len()
-                            );
-                        }
+                        debug!(
+                            "{} TimingRepair: Received metadata as StrictArray with {} items",
+                            self.context.name,
+                            items.len()
+                        );
+
                         let mut framerate_value: Option<f64> = None;
                         let mut audio_rate_value: Option<f64> = None;
                         for item in items.iter() {
                             if let Amf0Value::Number(value) = item {
                                 if *value > 10.0 && *value < 500.0 && framerate_value.is_none() {
                                     framerate_value = Some(*value);
-                                    if self.config.debug {
-                                        debug!(
-                                            "{} TimingRepair: Found potential framerate in StrictArray: {}",
-                                            self.context.name, *value
-                                        );
-                                    }
+
+                                    debug!(
+                                        "{} TimingRepair: Found potential framerate in StrictArray: {}",
+                                        self.context.name, *value
+                                    );
                                 } else if (*value == 44100.0
                                     || *value == 48000.0
                                     || *value == 22050.0
@@ -471,12 +464,11 @@ impl TimingRepairOperator {
                                     && audio_rate_value.is_none()
                                 {
                                     audio_rate_value = Some(*value);
-                                    if self.config.debug {
-                                        debug!(
-                                            "{} TimingRepair: Found potential audio sample rate in StrictArray: {}",
-                                            self.context.name, *value
-                                        );
-                                    }
+
+                                    debug!(
+                                        "{} TimingRepair: Found potential audio sample rate in StrictArray: {}",
+                                        self.context.name, *value
+                                    );
                                 }
                             }
                         }
@@ -490,24 +482,21 @@ impl TimingRepairOperator {
                                     .insert("audiosamplerate".to_string(), Amf0Value::Number(rate));
                             }
                             self.state.update_timing_params(&properties);
-                            if self.config.debug {
-                                debug!(
-                                    "{} TimingRepair: Updated timing params from StrictArray - video interval: {}ms, audio interval: {}ms",
-                                    self.context.name,
-                                    self.state.video_frame_interval,
-                                    self.state.audio_sample_interval
-                                );
-                            }
+
+                            debug!(
+                                "{} TimingRepair: Updated timing params from StrictArray - video interval: {}ms, audio interval: {}ms",
+                                self.context.name,
+                                self.state.video_frame_interval,
+                                self.state.audio_sample_interval
+                            );
                         }
                     }
                     _ => {
-                        if self.config.debug {
-                            debug!(
-                                "{} TimingRepair: Metadata format not supported: {:?}",
-                                self.context.name,
-                                amf_data.data[0].marker()
-                            );
-                        }
+                        error!(
+                            "{} TimingRepair: Metadata format not supported: {:?}",
+                            self.context.name,
+                            amf_data.data[0].marker()
+                        );
                     }
                 }
             }
@@ -529,9 +518,7 @@ impl FlvProcessor for TimingRepairOperator {
                 // Reset state when encountering a header
                 self.state.reset(&self.config);
 
-                if self.config.debug {
-                    debug!("{} TimingRepair: Processing new segment", self.context.name);
-                }
+                debug!("{} TimingRepair: Processing new segment", self.context.name);
 
                 // Forward the header unmodified
                 output(input)
@@ -610,15 +597,13 @@ impl FlvProcessor for TimingRepairOperator {
                     tag.timestamp_ms = corrected_timestamp;
                     self.state.correction_count += 1;
 
-                    if self.config.debug {
-                        debug!(
-                            "{} TimingRepair: Corrected timestamp: {}ms -> {}ms (delta: {}ms)",
-                            self.context.name,
-                            original_timestamp,
-                            corrected_timestamp,
-                            self.state.delta
-                        );
-                    }
+                    trace!(
+                        "{} TimingRepair: Corrected timestamp: {}ms -> {}ms (delta: {}ms)",
+                        self.context.name,
+                        original_timestamp,
+                        corrected_timestamp,
+                        self.state.delta
+                    );
                 }
 
                 // Update state with this tag
@@ -718,7 +703,6 @@ mod tests {
 
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Strict,
-            debug: true,
             ..Default::default()
         };
 
@@ -767,7 +751,6 @@ mod tests {
 
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Strict,
-            debug: true,
             ..Default::default()
         };
 
@@ -811,7 +794,6 @@ mod tests {
 
         let config = TimingRepairConfig {
             strategy: RepairStrategy::Relaxed,
-            debug: true,
             ..Default::default()
         };
 
