@@ -295,7 +295,8 @@ impl TimingState {
         };
 
         // Calculate the difference between expected and last timestamp
-        let diff: i64 = (expected - last.timestamp_ms).into();
+        // Convert to i64 before subtraction to avoid overflow
+        let diff: i64 = (expected as i64) - (last.timestamp_ms as i64);
 
         // Determine threshold based on media type, considering rounding errors
         let base_threshold = match tag.tag_type {

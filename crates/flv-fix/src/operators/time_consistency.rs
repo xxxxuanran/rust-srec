@@ -27,6 +27,17 @@
 //! - `Continuous`: Maintains an ever-increasing timeline across all segments
 //! - `Reset`: Resets the timeline to zero at each split point
 //!
+//! ## Usage in Pipeline
+//!
+//! This operator provides basic timestamp continuity across stream splits, but does not
+//! handle more complex timing issues like rebounds, discontinuities, or A/V sync problems.
+//! For complete timing correction, use this operator first, followed by `TimingRepairOperator`.
+//!
+//! Example pipeline:
+//! ```
+//! // 1. First apply TimeConsistencyOperator to handle split points
+//! // 2. Then apply TimingRepairOperator for comprehensive timing fixes
+//! ```
 //!
 //! ## License
 //!
@@ -226,8 +237,8 @@ impl FlvProcessor for TimeConsistencyOperator {
                 // Apply timestamp correction if needed
                 if self.state.timestamp_offset != 0 {
                     // Calculate the corrected timestamp, ensure it doesn't go negative
-                    let corrected =
-                        max(0, tag.timestamp_ms as i64 + self.state.timestamp_offset) as u32;
+                    let expected = tag.timestamp_ms as i64 + self.state.timestamp_offset;
+                    let corrected = max(0, expected) as u32;
                     tag.timestamp_ms = corrected;
 
                     trace!(
@@ -263,7 +274,7 @@ impl FlvProcessor for TimeConsistencyOperator {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{
-        create_audio_tag, create_test_context, create_test_header, create_video_tag,
+        self, create_audio_tag, create_test_context, create_test_header, create_video_tag,
     };
 
     use super::*;
@@ -434,13 +445,16 @@ mod tests {
             .collect();
 
         // With Continue mode, second segment should continue from last segment's max timestamp
-        // 1020 (last timestamp of first segment) + 500 (offset of first tag in second segment) = 1520
-        // Then each tag follows with 10ms increments
-        assert_eq!(timestamps, vec![1000, 1010, 1020, 1520, 1530, 1540]);
+        // Last timestamp of first segment = 1020
+        // First timestamp of second segment = 500
+        // Offset = 1020 - 500 = 520
+        // Applied to timestamps: 500+520=1020, 510+520=1030, 520+520=1040
+        assert_eq!(timestamps, vec![1000, 1010, 1020, 1020, 1030, 1040]);
     }
 
     #[test]
     fn test_decreasing_timestamp_handling() {
+        test_utils::init_tracing();
         let context = create_test_context();
         let mut operator = TimeConsistencyOperator::new(context, ContinuityMode::Reset);
         let mut output_items = Vec::new();
@@ -486,11 +500,192 @@ mod tests {
             })
             .collect();
 
-        // The decreasing timestamp should be adjusted to maintain monotonicity
-        // 990 should be adjusted to at least 1020 or higher
-        assert!(
-            timestamps[3] >= timestamps[2],
-            "Timestamps should be monotonically increasing"
+        // In Reset mode, first timestamp (1000) is used to calculate offset (-1000)
+        // So input timestamps [1000, 1010, 1020, 990, 1030] should become
+        // output timestamps [0, 10, 20, 0, 30]
+
+        // Verify all timestamps individually
+        assert_eq!(timestamps[0], 0, "First timestamp should be reset to 0");
+        assert_eq!(timestamps[1], 10, "Second timestamp should be 10");
+        assert_eq!(timestamps[2], 20, "Third timestamp should be 20");
+
+        // The decreasing timestamp (990) should be adjusted to 0 since:
+        // 990 + (-1000) = -10, which gets clamped to 0 by the max(0, ...) call
+        assert_eq!(
+            timestamps[3], 0,
+            "Decreasing timestamp should be adjusted to 0 after applying offset"
         );
+
+        assert_eq!(timestamps[4], 30, "Last timestamp should be 30");
+
+        // Complete expected sequence
+        assert_eq!(
+            timestamps,
+            vec![0, 10, 20, 0, 30],
+            "The sequence of timestamps should match expected values"
+        );
+    }
+
+    #[test]
+    fn test_multiple_splits() {
+        test_utils::init_tracing();
+        let context = create_test_context();
+
+        // Test with Continuous mode
+        {
+            let mut operator =
+                TimeConsistencyOperator::new(context.clone(), ContinuityMode::Continuous);
+            let mut output_items = Vec::new();
+
+            let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+                output_items.push(item);
+                Ok(())
+            };
+
+            // First segment: starts at 1000
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(1000, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(1010), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(1020, false), &mut output_fn)
+                .unwrap();
+
+            // Second segment: starts at 500
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(500, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(510), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(520, false), &mut output_fn)
+                .unwrap();
+
+            // Third segment: starts at 200
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(200, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(210), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(220, false), &mut output_fn)
+                .unwrap();
+
+            // Finish processing
+            operator.finish(&mut output_fn).unwrap();
+
+            // Extract tags and verify timestamps
+            let timestamps: Vec<u32> = output_items
+                .iter()
+                .filter_map(|item| {
+                    if let FlvData::Tag(tag) = item {
+                        Some(tag.timestamp_ms)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // With Continuous mode:
+            // 1. First segment: [1000, 1010, 1020]
+            // 2. Second segment: offset = 1020-500 = 520, so [500+520, 510+520, 520+520] = [1020, 1030, 1040]
+            // 3. Third segment: offset = 1040-200 = 840, so [200+840, 210+840, 220+840] = [1040, 1050, 1060]
+            assert_eq!(
+                timestamps,
+                vec![1000, 1010, 1020, 1020, 1030, 1040, 1040, 1050, 1060],
+                "Timestamps should maintain continuous sequence across multiple splits"
+            );
+        }
+
+        // Test with Reset mode
+        {
+            let mut operator = TimeConsistencyOperator::new(context.clone(), ContinuityMode::Reset);
+            let mut output_items = Vec::new();
+
+            let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+                output_items.push(item);
+                Ok(())
+            };
+
+            // First segment: starts at 1000
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(1000, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(1010), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(1020, false), &mut output_fn)
+                .unwrap();
+
+            // Second segment: starts at 500
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(500, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(510), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(520, false), &mut output_fn)
+                .unwrap();
+
+            // Third segment: starts at 200
+            operator
+                .process(create_test_header(), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(200, true), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_audio_tag(210), &mut output_fn)
+                .unwrap();
+            operator
+                .process(create_video_tag(220, false), &mut output_fn)
+                .unwrap();
+
+            // Finish processing
+            operator.finish(&mut output_fn).unwrap();
+
+            // Extract tags and verify timestamps
+            let timestamps: Vec<u32> = output_items
+                .iter()
+                .filter_map(|item| {
+                    if let FlvData::Tag(tag) = item {
+                        Some(tag.timestamp_ms)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // With Reset mode:
+            // 1. First segment: offset = -1000, so [0, 10, 20]
+            // 2. Second segment: offset = -500, so [0, 10, 20]
+            // 3. Third segment: offset = -200, so [0, 10, 20]
+            assert_eq!(
+                timestamps,
+                vec![0, 10, 20, 0, 10, 20, 0, 10, 20],
+                "Timestamps should reset to zero at the beginning of each segment"
+            );
+        }
     }
 }
