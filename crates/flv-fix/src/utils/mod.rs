@@ -1,4 +1,5 @@
 pub mod file_utils;
+pub mod template;
 
 // Re-export commonly used utilities for easier access
 pub use file_utils::{

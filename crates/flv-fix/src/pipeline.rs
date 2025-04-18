@@ -38,7 +38,7 @@ use std::sync::Arc;
 pub type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, FlvError>> + Send>>;
 
 /// Configuration options for the FLV processing pipeline
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PipelineConfig {
     /// Whether to filter duplicate tags
     pub duplicate_tag_filtering: bool,
@@ -57,9 +57,6 @@ pub struct PipelineConfig {
 
     /// Configuration for keyframe index injection
     pub keyframe_index_config: Option<ScriptFillerConfig>,
-
-    /// Channel buffer capacity for each stage of the pipeline
-    pub channel_buffer_size: usize,
 }
 
 impl Default for PipelineConfig {
@@ -71,7 +68,6 @@ impl Default for PipelineConfig {
             repair_strategy: RepairStrategy::Strict,
             continuity_mode: ContinuityMode::Reset,
             keyframe_index_config: Some(ScriptFillerConfig::default()),
-            channel_buffer_size: 16, // Default buffer size
         }
     }
 }

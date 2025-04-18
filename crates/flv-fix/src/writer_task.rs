@@ -33,6 +33,7 @@
 use crate::{
     analyzer::FlvAnalyzer,
     script_modifier::{self, ScriptModifierError},
+    template::expand_filename_template,
 };
 use chrono::Local;
 use flv::error::FlvError;
@@ -77,6 +78,8 @@ pub struct FlvWriterTask {
     output_dir: PathBuf,
     base_name: String,
     extension: String,
+    // New field to control whether to use base name directly
+    use_base_name_directly: bool,
 
     // Holds the stateful, synchronous FLV writer for the current output file.
     // Since FlvWriter<BufWriter<File>> is Send (File and BufWriter are Send),
@@ -120,6 +123,7 @@ impl FlvWriterTask {
             output_dir,
             base_name,
             extension: "flv".to_string(),
+            use_base_name_directly: false,
             current_writer: None, // Initialized as None
             file_counter: 0,
             current_file_tag_count: 0,
@@ -134,6 +138,13 @@ impl FlvWriterTask {
             on_segment_open: None,
             on_segment_close: None,
         })
+    }
+
+    /// Configure the writer to use the provided base name directly as the output filename
+    /// instead of adding counters and timestamps
+    pub fn use_base_name_directly(&mut self, value: bool) -> &mut Self {
+        self.use_base_name_directly = value;
+        self
     }
 
     /// Sets a callback closure that will be called with current status information.
@@ -342,13 +353,22 @@ impl FlvWriterTask {
         }
 
         // Prepare data for blocking task
-        let output_path = self.output_dir.join(format!(
-            "{}_p{:03}_{}.{}",
-            self.base_name,
-            self.file_counter,
-            Local::now().format("%Y%m%d_%H%M%S"),
-            self.extension
-        ));
+        let output_path = if self.use_base_name_directly {
+            // Use base name directly as filename
+            let file_name = expand_filename_template(&self.base_name, Some(self.file_counter));
+            self.output_dir
+                .join(format!("{}.{}", file_name, self.extension))
+        } else {
+            // Use traditional naming with part numbers and timestamps
+            self.output_dir.join(format!(
+                "{}_p{:03}_{}.{}",
+                self.base_name,
+                self.file_counter,
+                Local::now().format("%Y%m%d_%H%M%S"),
+                self.extension
+            ))
+        };
+
         self.current_file_path = Some(output_path.clone()); // Store the path for later use
         let header_clone = header.clone();
 
@@ -358,7 +378,10 @@ impl FlvWriterTask {
         self.current_file_size = 0;
         self.current_file_start_instant = Some(Instant::now());
 
-        // Perform blocking file creation and writer initialization
+        // Check if the output file already exists
+        if output_path.exists() {
+            tracing::warn!(path = %output_path.display(), "Output file already exists, will be overwritten");
+        }
         let output_file = std::fs::File::create(&output_path)?;
         let buffered_writer = std::io::BufWriter::with_capacity(1024 * 1024, output_file);
         let new_writer = FlvWriter::with_header(buffered_writer, &header_clone)?;

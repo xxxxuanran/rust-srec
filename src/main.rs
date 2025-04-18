@@ -2,6 +2,7 @@ use std::process::exit;
 use std::{path::PathBuf, time::Duration};
 
 use clap::Parser;
+use config::ProgramConfig;
 use flv_fix::operators::RepairStrategy;
 use flv_fix::operators::script_filler::ScriptFillerConfig;
 use flv_fix::pipeline::PipelineConfig;
@@ -10,6 +11,7 @@ use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod cli;
+mod config;
 mod error;
 mod processor;
 mod utils;
@@ -73,7 +75,7 @@ async fn main() {
     );
 
     // Configure pipeline
-    let config = PipelineConfig {
+    let pipeline_config = PipelineConfig {
         duplicate_tag_filtering: false,
         file_size_limit,
         duration_limit,
@@ -92,7 +94,6 @@ async fn main() {
         } else {
             None
         },
-        channel_buffer_size: args.buffer_size,
     };
 
     // Determine output directory
@@ -189,13 +190,19 @@ async fn main() {
     // Update progress status
     progress_manager.set_status(&format!("Processing {} input(s)...", args.input.len()));
 
+    // Create the program configuration
+    let program_config = ProgramConfig {
+        pipeline_config,
+        download_config: Some(download_config),
+        enable_processing: args.enable_fix,
+        channel_size: args.buffer_size,
+    };
+
     // Process input files
     match processor::process_inputs(
         &args.input,
         &output_dir,
-        config,
-        download_config,
-        args.enable_fix,
+        &program_config,
         args.output_name_template.as_deref(),
         &mut progress_manager,
     )

@@ -523,7 +523,6 @@ dependencies = [
  "crc32fast",
  "flv",
  "futures",
- "kanal",
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",

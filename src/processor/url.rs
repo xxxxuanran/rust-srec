@@ -1,27 +1,24 @@
 use flv::data::FlvData;
 use flv::error::FlvError;
 use flv_fix::context::StreamerContext;
-use flv_fix::pipeline::{FlvPipeline, PipelineConfig};
+use flv_fix::pipeline::FlvPipeline;
 use flv_fix::writer_task::FlvWriterTask;
 use futures::StreamExt;
 use indicatif::HumanBytes;
 use reqwest::Url;
 use siphon::FlvDownloader;
-use siphon::downloader::DownloaderConfig;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::info;
 
-use crate::utils::expand_filename_template;
+use crate::config::ProgramConfig;
 use crate::utils::progress::ProgressManager;
 
 /// Process a single URL with proxy support
 pub async fn process_url(
     url_str: &str,
     output_dir: &Path,
-    config: PipelineConfig,
-    download_config: DownloaderConfig,
-    enable_processing: bool,
+    config: ProgramConfig,
     name_template: Option<&str>,
     pb_manager: &mut ProgressManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -37,7 +34,9 @@ pub async fn process_url(
     let base_name = if let Some(template) = name_template {
         // Use template with placeholder expansion
         info!("Using custom filename template: {}", template);
-        expand_filename_template(template, Some(&url), None)
+        // expand_filename_template(template, Some(&url))
+        // use directly the template as the base name
+        template.to_string()
     } else {
         // Default behavior: extract from URL path
         let file_name = url
@@ -55,11 +54,14 @@ pub async fn process_url(
 
     info!(url = %url_str, filename = %base_name, "Processing with output filename");
 
+    // check if download config exists in the config
+    let download_config = config.download_config.unwrap_or_default();
+
     let downloader = FlvDownloader::with_config(download_config)?;
 
     pb_manager.set_status(&format!("Processing URL: {}", url_str));
 
-    if !enable_processing {
+    if !config.enable_processing {
         // Raw mode: download without parsing through FlvDecoderStream
         info!(
             url = %url_str,
@@ -80,7 +82,7 @@ pub async fn process_url(
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-            
+
         if !pb_manager.is_disabled() {
             pb_manager.add_file_progress(&filename);
             pb_manager.set_status(&format!("Downloading {}", filename));
@@ -113,11 +115,13 @@ pub async fn process_url(
 
         // Process through the pipeline
         let context = StreamerContext::default();
-        let pipeline = FlvPipeline::with_config(context, config);
+        let pipeline = FlvPipeline::with_config(context, config.pipeline_config);
 
         // Create the input stream
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
-        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(config.channel_size);
+        let (output_tx, output_rx) =
+            std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(config.channel_size);
 
         let process_task = Some(tokio::task::spawn_blocking(move || {
             let pipeline = pipeline.process();
@@ -144,9 +148,17 @@ pub async fn process_url(
         // Clone progress manager for the writer task
         let progress_clone = pb_manager.clone();
 
+        // Clone the name_template Option before moving it to the task
+        let has_template = name_template.is_some();
+
         // Create writer task and run it
         let writer_handle = tokio::task::spawn_blocking(move || {
             let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
+
+            // // Configure writer to use the base name directly if a template was provided
+            if has_template {
+                writer_task.use_base_name_directly(true);
+            }
 
             // Set up progress bar callbacks if progress is enabled
             progress_clone.setup_writer_task_callbacks(&mut writer_task);

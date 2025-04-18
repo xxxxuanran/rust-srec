@@ -1,11 +1,5 @@
-use reqwest::Url;
-
 /// Expand filename template with placeholders similar to FFmpeg
-pub fn expand_filename_template(
-    template: &str,
-    url: Option<&Url>,
-    metadata_title: Option<&str>,
-) -> String {
+pub fn expand_filename_template(template: &str, file_count: Option<u32>) -> String {
     use chrono::Local;
 
     let now = Local::now();
@@ -41,50 +35,11 @@ pub fn expand_filename_template(
                         result.push_str(&now.format("%S").to_string()); // Second (00-59)
                         chars.next();
                     }
-
-                    // URL-based placeholders
-                    'u' => {
-                        if let Some(url) = url {
-                            // Use the host as placeholder value
-                            if let Some(host) = url.host_str() {
-                                result.push_str(host);
-                            } else {
-                                result.push_str("unknown");
-                            }
+                    'i' => {
+                        if let Some(count) = file_count { 
+                            result.push_str(&format!("{:03}", count)); // Output index with 3 decimals
                         } else {
-                            result.push_str("local");
-                        }
-                        chars.next();
-                    }
-                    'f' => {
-                        if let Some(url) = url {
-                            // Extract filename from URL path
-                            let file_name = url
-                                .path_segments()
-                                .and_then(|mut segments| segments.next_back())
-                                .unwrap_or("download");
-
-                            // Remove extension if present
-                            let base_name = match file_name.rfind('.') {
-                                Some(pos) => &file_name[..pos],
-                                None => file_name,
-                            };
-
-                            result.push_str(base_name);
-                        } else {
-                            result.push_str("file");
-                        }
-                        chars.next();
-                    }
-
-                    // Metadata-based placeholders
-                    't' => {
-                        if let Some(title) = metadata_title {
-                            // Sanitize the title for use in a filename
-                            let sanitized = sanitize_filename(title);
-                            result.push_str(&sanitized);
-                        } else {
-                            result.push_str("untitled");
+                            result.push('1'); // Default to 1 if count is None
                         }
                         chars.next();
                     }

@@ -1,20 +1,16 @@
 mod file;
 mod url;
 
-use flv_fix::pipeline::PipelineConfig;
-use siphon::downloader::DownloaderConfig;
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
-use crate::utils::progress::ProgressManager;
+use crate::{config::ProgramConfig, utils::progress::ProgressManager};
 
 /// Determine the type of input and process accordingly
 pub async fn process_inputs(
     inputs: &[String],
     output_dir: &Path,
-    config: PipelineConfig,
-    download_config: DownloaderConfig,
-    enable_processing: bool,
+    config: &ProgramConfig,
     name_template: Option<&str>,
     progress_manager: &mut ProgressManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -66,8 +62,6 @@ pub async fn process_inputs(
                 input,
                 output_dir,
                 config.clone(),
-                download_config.clone(),
-                enable_processing,
                 name_template,
                 progress_manager,
             )
@@ -76,14 +70,7 @@ pub async fn process_inputs(
             // It's a file path
             let path = PathBuf::from(input);
             if path.exists() && path.is_file() {
-                file::process_file(
-                    &path,
-                    output_dir,
-                    config.clone(),
-                    enable_processing,
-                    progress_manager,
-                )
-                .await?;
+                file::process_file(&path, output_dir, config.clone(), progress_manager).await?;
             } else {
                 error!(
                     "Input is neither a valid URL nor an existing file: {}",

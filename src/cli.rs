@@ -156,7 +156,7 @@ pub struct CliArgs {
     #[arg(
         short = 'n',
         long = "name",
-        help = "Output file name template with placeholders (e.g., '%Y%m%d_%H%M%S_%f'). Supported placeholders: %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second), %f (original filename), %u (hostname), %t (title from metadata)"
+        help = "Output file name template with placeholders (e.g., '%Y%m%d_%H%M%S_p%i'). Supported placeholders: %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second), %i (output index)"
     )]
     pub output_name_template: Option<String>,
 

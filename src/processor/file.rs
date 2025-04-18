@@ -2,7 +2,7 @@ use flv::data::FlvData;
 use flv::error::FlvError;
 use flv::parser_async::FlvDecoderStream;
 use flv_fix::context::StreamerContext;
-use flv_fix::pipeline::{FlvPipeline, PipelineConfig};
+use flv_fix::pipeline::FlvPipeline;
 use flv_fix::writer_task::{FlvWriterTask, WriterError};
 use futures::StreamExt;
 use indicatif::HumanBytes;
@@ -11,6 +11,7 @@ use tokio::fs::File;
 use tokio::io::BufReader;
 use tracing::info;
 
+use crate::config::ProgramConfig;
 use crate::utils::format_bytes;
 use crate::utils::progress::ProgressManager;
 
@@ -18,8 +19,7 @@ use crate::utils::progress::ProgressManager;
 pub async fn process_file(
     input_path: &Path,
     output_dir: &Path,
-    config: PipelineConfig,
-    enable_processing: bool,
+    config: ProgramConfig,
     pb_manager: &mut ProgressManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
@@ -36,7 +36,7 @@ pub async fn process_file(
 
     info!(
         path = %input_path.display(),
-        processing_enabled = enable_processing,
+        processing_enabled = config.enable_processing,
         "Starting to process file"
     );
 
@@ -47,14 +47,14 @@ pub async fn process_file(
 
     // Update progress manager status if not disabled
     pb_manager.set_status(&format!("Processing {}", input_path.display()));
-    
+
     // Create a file-specific progress bar if progress manager is not disabled
     let file_name = input_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-        
+
     if !pb_manager.is_disabled() {
         pb_manager.add_file_progress(&file_name);
     }
@@ -65,11 +65,12 @@ pub async fn process_file(
     );
 
     // Create the input stream
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+    let (sender, receiver) =
+        std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(config.channel_size);
 
     let mut process_task = None;
 
-    let processed_stream = if enable_processing {
+    let processed_stream = if config.enable_processing {
         // Processing mode: run through the processing pipeline
         info!(
             path = %input_path.display(),
@@ -79,9 +80,10 @@ pub async fn process_file(
 
         // Create streamer context and pipeline
         let context = StreamerContext::default();
-        let pipeline = FlvPipeline::with_config(context, config);
+        let pipeline = FlvPipeline::with_config(context, config.pipeline_config);
 
-        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
+        let (output_tx, output_rx) =
+            std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(config.channel_size);
 
         process_task = Some(tokio::task::spawn_blocking(move || {
             let pipeline = pipeline.process();
@@ -136,18 +138,13 @@ pub async fn process_file(
         if let Ok(data) = &result {
             bytes_processed += data.size() as u64;
         }
-        
+
         // Send the result to the processing pipeline
         sender.send(result).unwrap()
     }
-    
+
     drop(sender); // Close the channel to signal completion
 
-    info!(
-        path = %input_path.display(),
-        "Finished processing input stream"
-    );
-    
     let (total_tags_written, files_created) = writer_handle.await??;
 
     if let Some(p) = process_task {
@@ -158,7 +155,7 @@ pub async fn process_file(
 
     // Finish progress bars with summary
     pb_manager.finish(&format!(
-        "Processed {} ({}) in {:?}",
+        "Processed {} ({} tags) in {:?}",
         HumanBytes(bytes_processed),
         total_tags_written,
         elapsed
@@ -168,7 +165,7 @@ pub async fn process_file(
         path = %input_path.display(),
         input_size = %format_bytes(file_size),
         duration = ?elapsed,
-        processing_enabled = enable_processing,
+        processing_enabled = config.enable_processing,
         tags_processed = total_tags_written,
         files_created = files_created,
         "Processing complete"
