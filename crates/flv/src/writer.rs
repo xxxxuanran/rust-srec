@@ -298,7 +298,6 @@ impl<W: Write + Seek> FlvWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::FlvFile;
     use std::io::Cursor;
 
     #[test]

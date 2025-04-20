@@ -722,7 +722,6 @@ mod tests {
 
         // Track split timestamps
         let split_timestamps = Arc::new(Mutex::new(Vec::new()));
-        let split_timestamps_clone = Arc::clone(&split_timestamps);
 
         // Configure with duration limit
         let config = LimitConfig {

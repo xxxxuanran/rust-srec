@@ -317,7 +317,7 @@ impl FlvParser {
 mod tests {
 
     use super::*;
-    use crate::tag::{FlvTag, FlvTagType, FlvUtil};
+    use crate::tag::{FlvTagType, FlvUtil};
     use bytes::BytesMut;
     use futures::TryStreamExt;
     use std::collections::HashMap;
@@ -482,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn test_flv_parser_invalid() {
         let path = Path::new("invalid.flv");
-        let parser = FlvParser::create_decoder_stream(&path).await;
+        let parser = FlvParser::create_decoder_stream(path).await;
         assert!(parser.is_err());
     }
 
@@ -728,7 +728,6 @@ mod tests {
             video_tags: u64,
             audio_tags: u64,
             metadata_tags: u64,
-            error_count: u64,
             last_timestamp: u32,
         }
 
@@ -738,7 +737,6 @@ mod tests {
             video_tags: 0,
             audio_tags: 0,
             metadata_tags: 0,
-            error_count: 0,
             last_timestamp: 0,
         };
 
@@ -837,7 +835,7 @@ mod tests {
 
         // Parse using the async parser and collect detailed tag information
         let async_start = Instant::now();
-        let mut stream = FlvParser::create_decoder_stream(&path).await?;
+        let mut stream = FlvParser::create_decoder_stream(path).await?;
 
         // Track all tags with their timestamps - we'll use these to compare
         let mut async_tag_counts = HashMap::new();

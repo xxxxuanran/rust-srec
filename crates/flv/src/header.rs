@@ -206,7 +206,7 @@ impl FlvHeader {
 mod tests {
     use super::*;
     use byteorder::{BigEndian, WriteBytesExt};
-    use bytes::{Bytes, BytesMut};
+    use bytes::Bytes;
     use std::io::Cursor;
 
     fn create_valid_header_bytes() -> Vec<u8> {

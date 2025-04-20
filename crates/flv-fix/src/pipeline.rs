@@ -213,13 +213,11 @@ mod test {
         let process_task = Some(tokio::task::spawn_blocking(move || {
             let pipeline = pipeline.process();
 
-            let input = std::iter::from_fn(|| {
-                return receiver.recv().map(|v| Some(v)).unwrap_or(None);
-            });
+            let input = std::iter::from_fn(|| receiver.recv().map(Some).unwrap_or(None));
 
             let mut output = |result: Result<FlvData, FlvError>| {
                 if output_tx.send(result).is_err() {
-                    return; // Return early if channel is closed
+                    tracing::warn!("Output channel closed, stopping processing");
                 }
             };
 
