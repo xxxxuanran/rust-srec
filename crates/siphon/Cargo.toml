@@ -1,11 +1,11 @@
 [package]
-name = "siphon"
-version = "0.1.0"
+name = "siphon-engine"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 bytes = "1.10.1"
-tokio = { version = "1.44.2", features = ["full"] }
+tokio = { version = "1.44.2", features = ["rt-multi-thread", "io-util"] }
 futures = "0.3"
 # chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [

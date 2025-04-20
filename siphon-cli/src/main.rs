@@ -6,7 +6,7 @@ use config::ProgramConfig;
 use flv_fix::operators::RepairStrategy;
 use flv_fix::operators::script_filler::ScriptFillerConfig;
 use flv_fix::pipeline::PipelineConfig;
-use siphon::{DownloaderConfig, ProxyAuth, ProxyConfig, ProxyType};
+use siphon_engine::{DownloaderConfig, ProxyAuth, ProxyConfig, ProxyType};
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 

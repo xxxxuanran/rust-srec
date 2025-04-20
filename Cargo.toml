@@ -1,6 +1,8 @@
 [workspace]
+resolver = "3"
 
 members = [
+    "siphon-cli",
     "crates/flv",
     "crates/flv-fix",
     "crates/siphon",
@@ -11,40 +13,6 @@ members = [
     "crates/h265",
     "crates/amf0",
 ]
-
-[package]
-name = "rust-srec"
-version = "0.2.2"
-edition = "2024"
-
-[dependencies]
-bytes = "1.10.1"
-byteorder = "1.5.0"
-kanal = "0.1"
-tokio = { version = "1.44.2", features = ["full"] }
-futures = "0.3"
-chrono = "0.4"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-
-# CLI dependencies
-clap = { version = "4.5", features = ["derive"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
-
-# Workspace crates
-flv = { path = "crates/flv" }
-flv-fix = { path = "crates/flv-fix" }
-siphon = { path = "crates/siphon" }
-indicatif = "0.17.11"
-
-[dev-dependencies]
-criterion = "0.5"
-
-[[bench]]
-name = "test_channels"
-harness = false
 
 [profile.release]
 lto = true
