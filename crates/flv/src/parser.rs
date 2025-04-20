@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BytesMut};
+use tracing::{debug, error};
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
@@ -52,7 +53,7 @@ impl FlvParser {
                         FlvTagType::Video => video_tags += 1,
                         FlvTagType::Audio => audio_tags += 1,
                         FlvTagType::ScriptData => metadata_tags += 1,
-                        _ => println!("Unknown tag type: {:?}", tag),
+                        _ => error!("Unknown tag type: {:?}", tag),
                     }
                 }
                 Ok(None) => break, // End of file
@@ -60,7 +61,7 @@ impl FlvParser {
             }
         }
 
-        println!(
+        debug!(
             "Audio tags: {}, Video tags: {}, Metadata tags: {}",
             audio_tags, video_tags, metadata_tags
         );

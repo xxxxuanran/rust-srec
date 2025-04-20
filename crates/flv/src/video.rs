@@ -75,6 +75,7 @@ use bytes::Bytes;
 use av1::{AV1CodecConfigurationRecord, AV1VideoDescriptor};
 use bytes_util::BytesCursorExt;
 use h265::HEVCDecoderConfigurationRecord;
+use tracing::debug;
 
 use super::av1::Av1Packet;
 use super::hevc::HevcPacket;
@@ -510,8 +511,8 @@ impl VideoTagBody {
                     _ => {}
                 }
 
-                println!("Video codec: {:?}", video_codec);
-                println!("Packet type: {:?}", packet_type);
+                debug!("Video codec: {:?}", video_codec);
+                debug!("Packet type: {:?}", packet_type);
 
                 match (video_codec, packet_type) {
                     (VideoFourCC::Avc1, EnhancedPacketType::SEQUENCE_START) => {
