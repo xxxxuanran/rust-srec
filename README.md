@@ -10,10 +10,10 @@ The project provides two main command-line applications: `strev-cli` and `mesio-
 
 ### `strev-cli`
 
-Please read the README.
+Please read the [README](https://github.com/hua0512/rust-srec/blob/main/strev-cli/README.md)
 
 ### `mesio-cli` 
 
-Please read the README.
+Please read the [README](https://github.com/hua0512/rust-srec/blob/main/mesio-cli/README.md)
 
 ---
