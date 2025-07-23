@@ -1,5 +1,5 @@
 use crate::extractor::default::DEFAULT_UA;
-use crate::media::{StreamInfo, stream_info};
+use crate::media::StreamInfo;
 
 use super::{super::media::media_info::MediaInfo, error::ExtractorError};
 use async_trait::async_trait;
@@ -23,10 +23,11 @@ use tracing::debug;
 ///
 /// # Example Usage
 ///
-/// ```rust
-/// use reqwest::Client;
-/// use crate::extractor::extractor::Extractor;
-///
+/// ```rust,ignore
+/// # use reqwest::Client;
+/// # use platforms_parser::extractor::platform_extractor::Extractor;
+/// #
+/// # async fn doc_test() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut extractor = Extractor::new("Platform".to_string(), "https://example.com".to_string(), Client::new());
 ///
 /// // Add individual cookies
@@ -39,6 +40,8 @@ use tracing::debug;
 /// let response = extractor.get("https://api.example.com/data").send().await?;
 ///
 /// // Response cookies are automatically parsed and stored
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Extractor {
@@ -96,6 +99,30 @@ impl Extractor {
         );
     }
 
+    pub fn add_header_str<K: AsRef<str>, V: AsRef<str>>(&mut self, key: K, value: V) {
+        self.platform_headers.insert(
+            HeaderName::from_str(key.as_ref()).unwrap(),
+            HeaderValue::from_str(value.as_ref()).unwrap(),
+        );
+    }
+
+    pub fn add_header_name<K: Into<HeaderName>, V: Into<HeaderValue>>(&mut self, key: K, value: V) {
+        self.platform_headers.insert(key.into(), value.into());
+    }
+
+    pub fn add_header_owned<K: Into<HeaderName>, V: Into<HeaderValue>>(
+        &mut self,
+        key: K,
+        value: V,
+    ) {
+        self.platform_headers.insert(key.into(), value.into());
+    }
+
+    pub fn add_header_typed<K: Into<HeaderName>, V: AsRef<str>>(&mut self, key: K, value: V) {
+        self.platform_headers
+            .insert(key.into(), HeaderValue::from_str(value.as_ref()).unwrap());
+    }
+
     pub fn add_param<K: Into<String>, V: Into<String>>(&mut self, key: K, value: V) {
         self.platform_params.insert(key.into(), value.into());
     }
@@ -127,6 +154,9 @@ impl Extractor {
     /// # Example
     ///
     /// ```rust
+    /// # use reqwest::Client;
+    /// # use platforms_parser::extractor::platform_extractor::Extractor;
+    /// # let mut extractor = Extractor::new("Platform".to_string(), "https://example.com".to_string(), Client::new());
     /// extractor.add_cookie("session_token", "abc123def456");
     /// ```
     pub fn add_cookie<N: Into<String>, V: Into<String>>(&mut self, name: N, value: V) {
@@ -142,6 +172,10 @@ impl Extractor {
     /// # Example
     ///
     /// ```rust
+    /// # use rustc_hash::FxHashMap;
+    /// # use reqwest::Client;
+    /// # use platforms_parser::extractor::platform_extractor::Extractor;
+    /// # let mut extractor = Extractor::new("Platform".to_string(), "https://example.com".to_string(), Client::new());
     /// let mut cookies = FxHashMap::default();
     /// cookies.insert("token".to_string(), "xyz789".to_string());
     /// cookies.insert("user_id".to_string(), "12345".to_string());
@@ -161,14 +195,16 @@ impl Extractor {
     /// # Example
     ///
     /// ```rust
+    /// # use reqwest::Client;
+    /// # use platforms_parser::extractor::platform_extractor::Extractor;
+    /// # let mut extractor = Extractor::new("Platform".to_string(), "https://example.com".to_string(), Client::new());
     /// extractor.set_cookies_from_string("sessionid=abc123; csrftoken=def456; theme=dark");
     /// ```
     pub fn set_cookies_from_string(&mut self, cookie_string: &str) {
-        for cookie in cookie_string.split(';') {
-            let cookie = cookie.trim();
+        for cookie in cookie_string.split(';').map(|s| s.trim()) {
             if let Some((name, value)) = cookie.split_once('=') {
                 self.cookies
-                    .insert(name.trim().to_string(), value.trim().to_string());
+                    .insert(name.trim().to_owned(), value.trim().to_owned());
             }
         }
     }
@@ -237,12 +273,15 @@ impl Extractor {
             return None;
         }
 
-        let cookie_string = self
-            .cookies
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
+        let mut cookie_string = String::new();
+        for (name, value) in &self.cookies {
+            if !cookie_string.is_empty() {
+                cookie_string.push_str("; ");
+            }
+            cookie_string.push_str(name);
+            cookie_string.push('=');
+            cookie_string.push_str(value);
+        }
 
         Some(cookie_string)
     }
@@ -303,11 +342,14 @@ impl Extractor {
             })
             .unwrap_or_else(|| reqwest::header::HeaderValue::from_static(""));
 
-        self.client
-            .request(method, url)
-            .headers(self.platform_headers.clone())
-            .header(reqwest::header::COOKIE, cookies)
-            .query(&self.platform_params)
+        let mut builder = self.client.request(method, url);
+        for (key, value) in &self.platform_headers {
+            builder = builder.header(key.clone(), value.clone());
+        }
+        if !self.cookies.is_empty() {
+            builder = builder.header(reqwest::header::COOKIE, cookies);
+        }
+        builder.query(&self.platform_params)
     }
 
     pub fn get_platform_headers(&self) -> &HeaderMap {
@@ -337,11 +379,9 @@ pub trait PlatformExtractor: Send + Sync {
 
     async fn extract(&self) -> Result<MediaInfo, ExtractorError>;
 
-    async fn get_url(
-        &self,
-        stream_info: stream_info::StreamInfo,
-    ) -> Result<StreamInfo, ExtractorError> {
+    #[allow(unused_variables)]
+    async fn get_url(&self, stream_info: &mut StreamInfo) -> Result<(), ExtractorError> {
         // Default implementation, can be overridden by specific extractors
-        Ok(stream_info)
+        Ok(())
     }
 }

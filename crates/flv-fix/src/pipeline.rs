@@ -21,16 +21,16 @@
 //! - **ScriptKeyframesFiller**: Prepares metadata for proper seeking by adding keyframe placeholders
 //! - **ScriptFilter**: Removes or modifies problematic script tags
 
-use crate::context::StreamerContext;
-use crate::operators::limit::LimitConfig;
-use crate::operators::script_filler::ScriptFillerConfig;
 use crate::operators::{
-    ContinuityMode, DefragmentOperator, GopSortOperator, HeaderCheckOperator, LimitOperator,
-    NFlvPipeline, RepairStrategy, ScriptFilterOperator, ScriptKeyframesFillerOperator,
-    SplitOperator, TimeConsistencyOperator, TimingRepairConfig, TimingRepairOperator,
+    ContinuityMode, DefragmentOperator, GopSortOperator, HeaderCheckOperator, LimitConfig,
+    LimitOperator, RepairStrategy, ScriptFillerConfig, ScriptFilterOperator,
+    ScriptKeyframesFillerOperator, SplitOperator, TimeConsistencyOperator, TimingRepairConfig,
+    TimingRepairOperator,
 };
+use flv::data::FlvData;
 use flv::error::FlvError;
 use futures::stream::Stream;
+use pipeline_common::{Pipeline, PipelineError, StreamerContext};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -95,14 +95,16 @@ impl FlvPipeline {
         }
     }
 
-    /// Process an FLV stream through the complete processing pipeline
-    // pub fn process(&self, receiver: std::sync::mpsc::Receiver<Result<FlvData, FlvError>>) -> std::sync::mpsc::Receiver<Result<FlvData, FlvError>> {
-    pub fn process(&self) -> NFlvPipeline {
+    /// Create and configure the pipeline with all necessary operators
+    pub fn build_pipeline(&self) -> Pipeline<FlvData> {
         let context = Arc::clone(&self.context);
         let config = self.config.clone();
 
+        // Create all operators with adapters
         let defrag_operator = DefragmentOperator::new(context.clone());
         let header_check_operator = HeaderCheckOperator::new(context.clone());
+
+        // Configure the limit operator
         let limit_config = LimitConfig {
             max_size_bytes: if config.file_size_limit > 0 {
                 Some(config.file_size_limit)
@@ -119,6 +121,8 @@ impl FlvPipeline {
             on_split: None,
         };
         let limit_operator = LimitOperator::with_config(context.clone(), limit_config);
+
+        // Create remaining operators
         let gop_sort_operator = GopSortOperator::new(context.clone());
         let script_filter_operator = ScriptFilterOperator::new(context.clone());
         let timing_repair_operator =
@@ -130,11 +134,14 @@ impl FlvPipeline {
             TimeConsistencyOperator::new(context.clone(), config.continuity_mode);
 
         // Create the KeyframeIndexInjector operator if enabled
-        let keyframe_index_operator = config.keyframe_index_config.map(|keyframe_config| {
+        let keyframe_index_operator = if let Some(keyframe_config) = config.keyframe_index_config {
             ScriptKeyframesFillerOperator::new(context.clone(), keyframe_config)
-        });
+        } else {
+            ScriptKeyframesFillerOperator::new(context.clone(), ScriptFillerConfig::default())
+        };
 
-        NFlvPipeline::new(context.clone())
+        // Build the pipeline using the generic Pipeline implementation
+        Pipeline::new(context)
             .add_processor(defrag_operator)
             .add_processor(header_check_operator)
             .add_processor(split_operator)
@@ -143,10 +150,21 @@ impl FlvPipeline {
             .add_processor(timing_repair_operator)
             .add_processor(limit_operator)
             .add_processor(time_consistency_2_operator)
-            .add_processor(keyframe_index_operator.unwrap_or_else(|| {
-                ScriptKeyframesFillerOperator::new(context.clone(), ScriptFillerConfig::default())
-            }))
+            .add_processor(keyframe_index_operator)
             .add_processor(script_filter_operator)
+    }
+
+    /// Process all input through the pipeline
+    pub fn process(
+        &self,
+        input: impl Iterator<Item = Result<FlvData, PipelineError>>,
+        output: &mut impl FnMut(Result<FlvData, PipelineError>),
+    ) -> Result<(), PipelineError> {
+        // Build the pipeline
+        let pipeline = self.build_pipeline();
+
+        // Run the pipeline and convert any errors
+        pipeline.process(input, output)
     }
 }
 
@@ -154,23 +172,24 @@ impl FlvPipeline {
 /// Tests for the FLV processing pipeline
 mod test {
     use super::*;
-    use crate::test_utils;
-    use crate::writer_task::FlvWriterTask;
-    use crate::{context::StreamerContext, writer_task::WriterError};
+    use crate::adapter::flv_error_to_pipeline_error;
+    use crate::writer::{FlvWriter, FlvWriterError};
 
     use flv::data::FlvData;
     use flv::parser_async::FlvDecoderStream;
     use futures::StreamExt;
+    use pipeline_common::init_test_tracing;
+    use std::io;
     use std::path::Path;
     use tracing::info;
 
     #[tokio::test]
     #[ignore]
     async fn test_process() -> Result<(), Box<dyn std::error::Error>> {
-        test_utils::init_tracing(); // Initialize tracing for logging using our common utility
+        init_test_tracing!();
 
         // Source and destination paths
-        let input_path = Path::new("D:/test/999/testHEVC.flv");
+        let input_path = Path::new("D:/test/999/16_02_26-福州~ 主播恋爱脑！！！.flv");
 
         // Skip if test file doesn't exist
         if !input_path.exists() {
@@ -211,35 +230,45 @@ mod test {
         let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Result<FlvData, FlvError>>(8);
 
         let process_task = Some(tokio::task::spawn_blocking(move || {
-            let pipeline = pipeline.process();
+            let pipeline = pipeline.build_pipeline();
 
-            let input = std::iter::from_fn(|| receiver.recv().map(Some).unwrap_or(None));
+            // Convert input from FlvError to PipelineError
+            let input = std::iter::from_fn(|| {
+                receiver
+                    .recv()
+                    .map(|result| result.map_err(flv_error_to_pipeline_error))
+                    .map(Some)
+                    .unwrap_or(None)
+            });
 
-            let mut output = |result: Result<FlvData, FlvError>| {
-                if output_tx.send(result).is_err() {
-                    tracing::warn!("Output channel closed, stopping processing");
+            let mut output = |result: Result<FlvData, PipelineError>| {
+                // Convert PipelineError back to FlvError for output
+                let flv_result = result
+                    .map_err(|e| FlvError::Io(io::Error::other(format!("Pipeline error: {e}"))));
+
+                if output_tx.send(flv_result).is_err() {
+                    tracing::warn!("Output channel closed, astopping processing");
                 }
             };
 
             if let Err(err) = pipeline.process(input, &mut output) {
                 output_tx
-                    .send(Err(FlvError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Pipeline error: {}", err),
-                    ))))
+                    .send(Err(FlvError::Io(io::Error::other(format!(
+                        "Pipeline error: {err}"
+                    )))))
                     .ok();
             }
         }));
 
         // Run the writer task with the receiver
         let writer_handle = tokio::task::spawn_blocking(move || {
-            let mut writer_task = FlvWriterTask::new(output_dir, base_name)?;
+            let mut writer_task = FlvWriter::new(output_dir, base_name, None);
 
             writer_task.run(output_rx)?;
 
-            Ok::<_, WriterError>((
-                writer_task.total_tags_written(),
-                writer_task.files_created(),
+            Ok::<_, FlvWriterError>((
+                writer_task.get_state().items_written_total,
+                writer_task.get_state().file_sequence_number,
             ))
         });
 

@@ -1,0 +1,53 @@
+[package]
+name = "strev"
+version = "0.1.0"
+edition = "2024"
+description = "Strev (Streev) - CLI tool for streaming media extraction and retrieval from various platforms"
+authors = ["rust-srec team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hua0512/rust-srec"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+platforms-parser = { path = "../crates/platforms" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = "0.12"
+
+tokio = { version = "1.46.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
+
+# CLI framework
+clap = { version = "4.5", features = ["derive", "env", "string"] }
+clap_complete = "4.5"
+
+# UI and output (some made optional)
+colored = { version = "2.1.0", optional = true }
+indicatif = "0.17"
+inquire = { version = "0.7", optional = true }
+tabled = { version = "0.16", optional = true }
+
+# Simplified configuration
+confy = "0.6"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities (some made optional)
+url = "2.4"
+regex = { version = "1.0", optional = true }
+
+[features]
+default = ["interactive", "colored-output", "table-output", "regex-filters"]
+interactive = ["inquire"]
+colored-output = ["colored"]
+table-output = ["tabled"]
+regex-filters = ["regex"]
+minimal = []                                                                 # No optional features

@@ -146,9 +146,8 @@ impl Twitcasting {
         for (url, quality) in stream_configs {
             if let Some(stream_url) = url {
                 let info = self
-                    .extract_hls_stream::<()>(
+                    .extract_hls_stream(
                         &self.extractor.client,
-                        None,
                         None,
                         stream_url,
                         Some(quality),
@@ -217,6 +216,7 @@ mod tests {
     async fn test_twitcasting_extractor() {
         let _ = tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
+            .with_test_writer()
             .try_init();
 
         let url = "https://twitcasting.tv/nodasori2525";

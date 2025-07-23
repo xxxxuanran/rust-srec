@@ -1,0 +1,37 @@
+[package]
+name = "mesio"
+version = "0.2.4"
+edition = "2024"
+description = "Mesio (media) streaming downloader CLI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hua0512/rust-srec"
+
+[dependencies]
+bytes = "1.10.1"
+byteorder = "1.5.0"
+kanal = "0.1"
+tokio = { version = "1.44.2", features = ["full"] }
+futures = "0.3"
+chrono = "0.4"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["ansi"] }
+
+# Workspace crates
+pipeline-common = { path = "../crates/pipeline-common" }
+flv = { path = "../crates/flv" }
+flv-fix = { path = "../crates/flv-fix" }
+hls = { path = "../crates/hls" }
+hls-fix = { path = "../crates/hls-fix" }
+mesio-engine = { path = "../crates/mesio" }
+indicatif = "0.17.11"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

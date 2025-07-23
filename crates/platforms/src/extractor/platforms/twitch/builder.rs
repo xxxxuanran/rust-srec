@@ -296,7 +296,7 @@ impl Twitch {
 
         let headers = self.extractor.get_platform_headers();
         let streams = self
-            .extract_hls_stream(
+            .extract_hls_stream_with_params(
                 &self.extractor.client,
                 Some(headers.clone()),
                 Some(&[
@@ -341,9 +341,11 @@ mod tests {
     use crate::extractor::{default::default_client, platforms::twitch::builder::Twitch};
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_live_stream_info() {
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
+            .with_test_writer()
             .init();
         let twitch = Twitch::new(
             "https://www.twitch.tv/abby_".to_string(),

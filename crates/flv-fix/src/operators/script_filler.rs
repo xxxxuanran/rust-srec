@@ -45,15 +45,13 @@
 //! - hua0512
 //!
 
-use crate::context::StreamerContext;
-use crate::operators::FlvProcessor;
 use amf0::{Amf0Marker, Amf0Value, write_amf_property_key};
 use byteorder::{BigEndian, WriteBytesExt};
 use bytes::Bytes;
 use flv::data::FlvData;
-use flv::error::FlvError;
 use flv::script::ScriptData;
 use flv::tag::{FlvTag, FlvTagType};
+use pipeline_common::{PipelineError, Processor, StreamerContext};
 use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -131,7 +129,7 @@ impl ScriptKeyframesFillerOperator {
     fn create_script_tag_payload() -> Bytes {
         // Create a new script tag with empty data
         let mut buffer = Vec::new();
-        amf0::Amf0Encoder::encode_string(&mut buffer, "onMetaData").unwrap();
+        amf0::Amf0Encoder::encode_string(&mut buffer, crate::AMF0_ON_METADATA).unwrap();
         amf0::Amf0Encoder::encode(
             &mut buffer,
             &Amf0Value::Object(Cow::Owned(vec![
@@ -368,7 +366,7 @@ impl ScriptKeyframesFillerOperator {
                 );
 
                 // Verify we have "onMetaData" with non-empty data array
-                if amf_data.name != "onMetaData" {
+                if amf_data.name != crate::AMF0_ON_METADATA {
                     warn!(
                         "{} Script tag name is not 'onMetaData', found: '{}'. Creating fallback.",
                         self.context.name, amf_data.name
@@ -452,12 +450,12 @@ impl ScriptKeyframesFillerOperator {
     }
 }
 
-impl FlvProcessor for ScriptKeyframesFillerOperator {
+impl Processor<FlvData> for ScriptKeyframesFillerOperator {
     fn process(
         &mut self,
         input: FlvData,
-        output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
-    ) -> Result<(), FlvError> {
+        output: &mut dyn FnMut(FlvData) -> Result<(), PipelineError>,
+    ) -> Result<(), PipelineError> {
         match input {
             FlvData::Header(_) => {
                 debug!("{} Received Header. Forwarding.", self.context.name);
@@ -495,8 +493,8 @@ impl FlvProcessor for ScriptKeyframesFillerOperator {
 
     fn finish(
         &mut self,
-        _output: &mut dyn FnMut(FlvData) -> Result<(), FlvError>,
-    ) -> Result<(), FlvError> {
+        _output: &mut dyn FnMut(FlvData) -> Result<(), PipelineError>,
+    ) -> Result<(), PipelineError> {
         info!(
             "{} Script modification operator finished.",
             self.context.name
@@ -516,6 +514,9 @@ mod tests {
     use amf0::Amf0Value;
     use bytes::Bytes;
     use flv::{header::FlvHeader, tag::FlvTagType};
+    use pipeline_common::create_test_context;
+    use pipeline_common::init_test_tracing;
+
     use std::collections::HashMap;
 
     // Helper function to extract keyframes object from tag data
@@ -539,7 +540,7 @@ mod tests {
                                             }
                                         })
                                         .collect();
-                                    result.insert(kf_key.to_string(), values);
+                                    result.insert(kf_key.as_ref().to_owned(), values);
                                 }
                             }
                             return Some(result);
@@ -553,8 +554,8 @@ mod tests {
 
     #[test]
     fn test_add_keyframes_to_amf() {
-        test_utils::init_tracing();
-        let context = test_utils::create_test_context();
+        init_test_tracing!();
+        let context = create_test_context();
         let config = ScriptFillerConfig::default();
         let operator = ScriptKeyframesFillerOperator::new(context, config);
 
@@ -599,14 +600,14 @@ mod tests {
 
     #[test]
     fn test_process_flow() {
-        test_utils::init_tracing();
-        let context = test_utils::create_test_context();
+        init_test_tracing!();
+        let context = create_test_context();
         let config = ScriptFillerConfig::default();
         let mut operator = ScriptKeyframesFillerOperator::new(context, config);
         let mut output_items = Vec::new();
 
         // Create a mutable output function
-        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+        let mut output_fn = |item: FlvData| -> Result<(), PipelineError> {
             output_items.push(item);
             Ok(())
         };
@@ -680,14 +681,14 @@ mod tests {
 
     #[test]
     fn test_malformed_script_data() {
-        test_utils::init_tracing();
-        let context = test_utils::create_test_context();
+        init_test_tracing!();
+        let context = create_test_context();
         let config = ScriptFillerConfig::default();
         let mut operator = ScriptKeyframesFillerOperator::new(context, config);
         let mut output_items = Vec::new();
 
         // Create a mutable output function
-        let mut output_fn = |item: FlvData| -> Result<(), FlvError> {
+        let mut output_fn = |item: FlvData| -> Result<(), PipelineError> {
             output_items.push(item);
             Ok(())
         };
