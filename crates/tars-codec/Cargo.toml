@@ -7,10 +7,6 @@ edition = "2024"
 bytes = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }
 thiserror = "2.0"
-serde = { version = "1.0", features = ["derive"] }
 smallvec = "1.15.1"
 rustc-hash = { version = "2.1" }
 
-[dev-dependencies]
-criterion = { version = "0.6.0", features = ["html_reports"] }
-rand = "0.9.1"
