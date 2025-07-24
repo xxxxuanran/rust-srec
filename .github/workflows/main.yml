@@ -112,20 +112,24 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts
 
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+          cp artifacts/mesio-linux-amd64/mesio release-files/mesio-linux-amd64
+          cp artifacts/mesio-linux-arm64/mesio release-files/mesio-linux-arm64
+          cp artifacts/mesio-windows-amd64.exe/mesio.exe release-files/mesio-windows-amd64.exe
+          cp artifacts/mesio-macos-amd64/mesio release-files/mesio-macos-amd64
+          cp artifacts/strev-linux-amd64/strev release-files/strev-linux-amd64
+          cp artifacts/strev-linux-arm64/strev release-files/strev-linux-arm64
+          cp artifacts/strev-windows-amd64.exe/strev.exe release-files/strev-windows-amd64.exe
+          cp artifacts/strev-macos-amd64/strev release-files/strev-macos-amd64
+
       - name: Create release
         id: create_release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: |
-            artifacts/mesio-linux-amd64/mesio
-            artifacts/mesio-linux-arm64/mesio
-            artifacts/mesio-windows-amd64.exe/mesio.exe
-            artifacts/mesio-macos-amd64/mesio
-            artifacts/strev-linux-amd64/strev
-            artifacts/strev-linux-arm64/strev
-            artifacts/strev-windows-amd64.exe/strev.exe
-            artifacts/strev-macos-amd64/strev
+          files: release-files/*
           draft: false
           prerelease: false
