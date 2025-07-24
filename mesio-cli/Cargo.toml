@@ -10,7 +10,11 @@ repository = "https://github.com/hua0512/rust-srec"
 bytes = "1.10.1"
 tokio = { version = "1.44.2", features = ["full"] }
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
 
 # CLI dependencies
 clap = { version = "4.5", features = ["derive"] }
