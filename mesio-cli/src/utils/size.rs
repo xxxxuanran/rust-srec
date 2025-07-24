@@ -1,13 +1,13 @@
-use crate::error::ParseError;
+use crate::error::AppError;
 
 /// Function to parse size with units
-pub fn parse_size(size_str: &str) -> Result<u64, ParseError> {
+pub fn parse_size(size_str: &str) -> Result<u64, AppError> {
     // Trim whitespace and handle case-insensitivity
     let size_str = size_str.trim().to_lowercase();
 
     // Handle empty string
     if size_str.is_empty() {
-        return Err(ParseError::InvalidFormat);
+        return Err(AppError::ParseError("Invalid format: empty string".to_string()));
     }
 
     // Split the numeric part and the unit
@@ -26,14 +26,14 @@ pub fn parse_size(size_str: &str) -> Result<u64, ParseError> {
     if unit_part.is_empty() {
         let bytes = numeric_part
             .parse::<u64>()
-            .map_err(|_| ParseError::InvalidNumber)?;
+            .map_err(|_| AppError::ParseError("Invalid number".to_string()))?;
         return Ok(bytes);
     }
 
     // Parse the numeric part
     let value = numeric_part
         .parse::<f64>()
-        .map_err(|_| ParseError::InvalidNumber)?;
+        .map_err(|_| AppError::ParseError("Invalid number".to_string()))?;
 
     // Parse the unit and convert to bytes
     match unit_part.trim() {
@@ -42,7 +42,7 @@ pub fn parse_size(size_str: &str) -> Result<u64, ParseError> {
         "mb" => Ok((value * 1024.0 * 1024.0) as u64),
         "gb" => Ok((value * 1024.0 * 1024.0 * 1024.0) as u64),
         "tb" => Ok((value * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64),
-        _ => Err(ParseError::InvalidUnit),
+        _ => Err(AppError::ParseError("Invalid unit".to_string())),
     }
 }
 

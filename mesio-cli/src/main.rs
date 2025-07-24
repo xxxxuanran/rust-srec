@@ -1,9 +1,9 @@
-use std::process::exit;
 use std::str::FromStr;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Parser;
 use config::ProgramConfig;
+use error::AppError;
 use flv_fix::PipelineConfig;
 use flv_fix::RepairStrategy;
 use flv_fix::ScriptFillerConfig;
@@ -11,9 +11,9 @@ use indicatif::MultiProgress;
 use mesio_engine::flv::FlvConfig;
 use mesio_engine::{DownloaderConfig, HlsProtocolBuilder, ProxyAuth, ProxyConfig, ProxyType};
 use output::provider::OutputFormat;
-use tracing::{Level, error, info};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, Level};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::FmtSubscriber;
 
 mod cli;
 mod config;
@@ -26,8 +26,17 @@ use cli::CliArgs;
 use utils::progress::ProgressManager;
 use utils::{format_bytes, format_duration, parse_size, parse_time};
 
+fn main() {
+    if let Err(e) = bootstrap() {
+        eprintln!("Error: {e}");
+        // Log the full error for debugging
+        error!(error = ?e, "Application failed");
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main]
-async fn main() {
+async fn bootstrap() -> Result<(), AppError> {
     // Parse command-line arguments
     let args = CliArgs::parse();
 
@@ -41,15 +50,7 @@ async fn main() {
         .create(true)
         .write(true)
         .truncate(true)
-        .open("mesio.log")
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "Warning: Failed to create log file 'mesio.log': {e}. Logging to console only."
-            );
-            // Return a dummy writer that discards everything
-            std::fs::File::create(std::env::temp_dir().join("mesio_dummy.log"))
-                .expect("Failed to create temporary log file")
-        });
+        .open("mesio.log")?;
 
     let multi_writer = MakeWriterExt::and(std::io::stdout, log_file);
 
@@ -58,7 +59,8 @@ async fn main() {
         .with_writer(multi_writer)
         .with_ansi(true)
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| AppError::Initialization(e.to_string()))?;
 
     info!("███╗   ███╗███████╗███████╗██╗ ██████╗ ");
     info!("████╗ ████║██╔════╝██╔════╝██║██╔═══██╗");
@@ -72,21 +74,9 @@ async fn main() {
     info!("==================================================================");
 
     // Parse size and duration with units
-    let file_size_limit = match parse_size(&args.max_size) {
-        Ok(size) => size,
-        Err(e) => {
-            error!("Invalid size format '{}': {}", args.max_size, e);
-            exit(1);
-        }
-    };
+    let file_size_limit = parse_size(&args.max_size)?;
 
-    let duration_limit = match parse_time(&args.max_duration) {
-        Ok(duration) => duration,
-        Err(e) => {
-            error!("Invalid duration format '{}': {}", args.max_duration, e);
-            exit(1);
-        }
-    };
+    let duration_limit = parse_time(&args.max_duration)?;
 
     // Log the parsed values
     if file_size_limit > 0 {
@@ -153,18 +143,16 @@ async fn main() {
             "https" => ProxyType::Https,
             "socks5" => ProxyType::Socks5,
             "all" => {
-                error!(
-                    "Invalid proxy type: '{}'. Using 'http' as default.",
+                return Err(AppError::InvalidInput(format!(
+                    "Invalid proxy type: '{}'",
                     args.proxy_type
-                );
-                ProxyType::Http
+                )));
             }
             _ => {
-                error!(
-                    "Invalid proxy type: '{}'. Using 'http' as default.",
+                return Err(AppError::InvalidInput(format!(
+                    "Invalid proxy type: '{}'",
                     args.proxy_type
-                );
-                ProxyType::Http
+                )));
             }
         };
 
@@ -227,17 +215,20 @@ async fn main() {
     // Create HLS-specific configuration
     let hls_config = HlsProtocolBuilder::new()
         .with_base_config(download_config.clone())
-        .download_concurrency(args.hls_concurrency.try_into().unwrap())
+        .download_concurrency(
+            args.hls_concurrency
+                .try_into()
+                .map_err(|_| AppError::InvalidInput("Invalid HLS concurrency".to_string()))?,
+        )
         .segment_retry_count(args.hls_retries)
         .get_config();
 
-    let output_format = OutputFormat::from_str(&args.output_format).unwrap_or_else(|_| {
-        error!(
-            "Invalid output format: '{}'. Defaulting to 'file'.",
+    let output_format = OutputFormat::from_str(&args.output_format).map_err(|_| {
+        AppError::InvalidInput(format!(
+            "Invalid output format: '{}'",
             args.output_format
-        );
-        OutputFormat::File
-    });
+        ))
+    })?;
 
     // Create the program configuration
     let mut program_config = ProgramConfig {
@@ -250,7 +241,7 @@ async fn main() {
     };
 
     // Process input files
-    match processor::process_inputs(
+    processor::process_inputs(
         &args.input,
         &output_dir,
         &mut program_config,
@@ -259,14 +250,6 @@ async fn main() {
             progress_manager.handle_event(event);
         })),
     )
-    .await
-    {
-        Ok(_) => {
-            info!("All processing completed");
-        }
-        Err(e) => {
-            error!(error = ?e, "Processing failed");
-            exit(1);
-        }
-    }
+    .await?;
+    Ok(())
 }

@@ -43,6 +43,10 @@ pub enum ScriptModifierError {
     Io(#[from] io::Error),
     #[error("FLV Error: {0}")]
     Flv(#[from] flv::error::FlvError),
+    #[error("AMF0 Read Error: {0}")]
+    Amf0Read(#[from] amf0::Amf0ReadError),
+    #[error("AMF0 Write Error: {0}")]
+    Amf0Write(#[from] amf0::Amf0WriteError),
     #[error("Script data error: {0}")]
     ScriptData(&'static str),
 }
@@ -55,9 +59,6 @@ pub fn inject_stats_into_script_data(
 ) -> Result<(), ScriptModifierError> {
     let file_path_clone = file_path.to_path_buf();
     update_script_metadata(&file_path_clone, stats)
-        .map_err(|e| ScriptModifierError::Io(io::Error::other(format!("Task join error: {e}"))))?;
-
-    Ok(())
 }
 
 /// Write keyframes section with adjusted file positions
@@ -95,20 +96,20 @@ fn write_keyframes_section(
     position_adjustment: i64,
 ) -> Result<(), ScriptModifierError> {
     write_amf_property_key!(buffer, "keyframes");
-    buffer.write_u8(Amf0Marker::Object as u8).unwrap();
+    buffer.write_u8(Amf0Marker::Object as u8)?;
 
     let keyframes_length = keyframes.len() as u32;
     debug!("Injecting {} keyframes", keyframes_length);
 
     // Write times array
     write_amf_property_key!(buffer, "times");
-    buffer.write_u8(Amf0Marker::StrictArray as u8).unwrap();
-    buffer.write_u32::<BigEndian>(keyframes_length).unwrap();
+    buffer.write_u8(Amf0Marker::StrictArray as u8)?;
+    buffer.write_u32::<BigEndian>(keyframes_length)?;
 
     for keyframe in keyframes.iter() {
         let keyframe_time = keyframe.timestamp_s;
         trace!("Injecting keyframe at time {}", keyframe_time);
-        amf0::Amf0Encoder::encode_number(buffer, keyframe_time as f64).unwrap();
+        amf0::Amf0Encoder::encode_number(buffer, keyframe_time as f64)?;
     }
 
     // Write filepositions array with adjusted positions
@@ -137,11 +138,11 @@ fn write_keyframes_section(
             "Injecting keyframe at position {} (adjusted from {} with diff {})",
             adjusted_keyframe_pos, keyframe.file_position, position_adjustment
         );
-        amf0::Amf0Encoder::encode_u64(buffer, adjusted_keyframe_pos).unwrap();
+        amf0::Amf0Encoder::encode_u64(buffer, adjusted_keyframe_pos)?;
     }
 
     // close keyframes object
-    amf0::Amf0Encoder::object_eof(buffer).unwrap();
+    amf0::Amf0Encoder::object_eof(buffer)?;
 
     Ok(())
 }
@@ -227,91 +228,87 @@ fn update_script_metadata(
     // Generate new script data buffer
     if let Amf0Value::Object(props) = &amf_data[0] {
         let mut buffer: Vec<u8> = Vec::with_capacity(original_payload_data as usize);
-        Amf0Encoder::encode_string(&mut buffer, crate::AMF0_ON_METADATA).unwrap();
+        Amf0Encoder::encode_string(&mut buffer, crate::AMF0_ON_METADATA)?;
 
         for key in NATURAL_METADATA_KEY_ORDER.iter() {
             match *key {
                 "duration" => {
                     let duration = stats.duration;
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_number(&mut buffer, duration as f64).unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, duration as f64)?;
                 }
                 "width" => {
                     write_amf_property_key!(&mut buffer, key);
                     if let Some(resolution) = stats.resolution {
-                        Amf0Encoder::encode_number(&mut buffer, resolution.width as f64).unwrap();
+                        Amf0Encoder::encode_number(&mut buffer, resolution.width as f64)?;
                     } else {
                         let original_value =
                             props.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
                         Amf0Encoder::encode(
                             &mut buffer,
                             &original_value.unwrap_or(Amf0Value::Number(0.0)),
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
                 "height" => {
                     write_amf_property_key!(&mut buffer, key);
                     if let Some(resolution) = stats.resolution {
-                        Amf0Encoder::encode_number(&mut buffer, resolution.height as f64).unwrap();
+                        Amf0Encoder::encode_number(&mut buffer, resolution.height as f64)?;
                     } else {
                         let original_value =
                             props.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
                         Amf0Encoder::encode(
                             &mut buffer,
                             &original_value.unwrap_or(Amf0Value::Number(0.0)),
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
                 "framerate" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_number(&mut buffer, stats.video_frame_rate as f64).unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, stats.video_frame_rate as f64)?;
                 }
                 "videocodecid" => {
                     write_amf_property_key!(&mut buffer, key);
 
                     if let Some(codec_id) = stats.video_codec {
-                        Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64).unwrap();
+                        Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64)?;
                     } else {
                         let original_value =
                             props.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
                         Amf0Encoder::encode(
                             &mut buffer,
                             &original_value.unwrap_or(Amf0Value::Number(0.0)),
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
                 "audiocodecid" => {
                     write_amf_property_key!(&mut buffer, key);
                     if let Some(codec_id) = stats.audio_codec {
-                        Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64).unwrap();
+                        Amf0Encoder::encode_number(&mut buffer, codec_id as u8 as f64)?;
                     } else {
                         let original_value =
                             props.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
                         Amf0Encoder::encode(
                             &mut buffer,
                             &original_value.unwrap_or(Amf0Value::Number(0.0)),
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
                 "hasAudio" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, stats.has_audio).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, stats.has_audio)?;
                 }
                 "hasVideo" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, stats.has_video).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, stats.has_video)?;
                 }
                 "hasMetadata" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, true).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, true)?;
                 }
                 "hasKeyframes" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, !stats.keyframes.is_empty()).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, !stats.keyframes.is_empty())?;
                 }
                 "canSeekToEnd" => {
                     write_amf_property_key!(&mut buffer, key);
@@ -319,71 +316,68 @@ fn update_script_metadata(
                     Amf0Encoder::encode_bool(
                         &mut buffer,
                         stats.last_keyframe_timestamp == stats.last_timestamp,
-                    )
-                    .unwrap();
+                    )?;
                 }
                 "datasize" => {
                     write_amf_property_key!(&mut buffer, key);
                     let data_size = stats.audio_data_size + stats.video_data_size;
-                    Amf0Encoder::encode_u64(&mut buffer, data_size).unwrap();
+                    Amf0Encoder::encode_u64(&mut buffer, data_size)?;
                 }
                 "filesize" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u64(&mut buffer, stats.file_size).unwrap();
+                    Amf0Encoder::encode_u64(&mut buffer, stats.file_size)?;
                 }
                 "audiosize" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u64(&mut buffer, stats.audio_data_size).unwrap();
+                    Amf0Encoder::encode_u64(&mut buffer, stats.audio_data_size)?;
                 }
                 "audiodatarate" => {
                     write_amf_property_key!(&mut buffer, key);
                     let audio_bitrate = stats.audio_sample_rate as f64;
-                    Amf0Encoder::encode_number(&mut buffer, audio_bitrate).unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, audio_bitrate)?;
                 }
                 "audiosamplerate" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_number(&mut buffer, stats.audio_sample_rate as f64)
-                        .unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, stats.audio_sample_rate as f64)?;
                 }
                 "audiosamplesize" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_number(&mut buffer, stats.audio_sample_size as f64)
-                        .unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, stats.audio_sample_size as f64)?;
                 }
                 "stereo" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_bool(&mut buffer, stats.audio_stereo).unwrap();
+                    Amf0Encoder::encode_bool(&mut buffer, stats.audio_stereo)?;
                 }
                 "videosize" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u64(&mut buffer, stats.video_data_size).unwrap();
+                    Amf0Encoder::encode_u64(&mut buffer, stats.video_data_size)?;
                 }
                 "videodatarate" => {
                     write_amf_property_key!(&mut buffer, key);
                     let video_bitrate = stats.video_data_rate as f64;
-                    Amf0Encoder::encode_number(&mut buffer, video_bitrate).unwrap();
+                    Amf0Encoder::encode_number(&mut buffer, video_bitrate)?;
                 }
                 "lasttimestamp" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u32(&mut buffer, stats.last_timestamp).unwrap();
+                    Amf0Encoder::encode_u32(&mut buffer, stats.last_timestamp)?;
                 }
                 "lastkeyframelocation" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u64(&mut buffer, stats.last_keyframe_position).unwrap();
+                    Amf0Encoder::encode_u64(&mut buffer, stats.last_keyframe_position)?;
                 }
                 "lastkeyframetimestamp" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_u32(&mut buffer, stats.last_keyframe_timestamp).unwrap();
+                    Amf0Encoder::encode_u32(&mut buffer, stats.last_keyframe_timestamp)?;
                 }
                 "metadatacreator" => {
                     write_amf_property_key!(&mut buffer, key);
-                    Amf0Encoder::encode_string(&mut buffer, "Srec").unwrap();
+                    Amf0Encoder::encode_string(&mut buffer, "Srec")?;
                 }
                 "metadatadate" => {
                     write_amf_property_key!(&mut buffer, key);
                     let value = Utc::now().to_rfc3339();
 
-                    Amf0Encoder::encode_string(&mut buffer, &value).unwrap();
+                    Amf0Encoder::encode_string(&mut buffer, &value)?;
                 }
                 _ => {}
             }
@@ -394,7 +388,7 @@ fn update_script_metadata(
             if !NATURAL_METADATA_KEY_ORDER.contains(&key.as_ref()) {
                 debug!("Adding custom property: {} with value: {:?}", key, value);
                 write_amf_property_key!(buffer, key);
-                amf0::Amf0Encoder::encode(&mut buffer, value).unwrap();
+                amf0::Amf0Encoder::encode(&mut buffer, value)?;
                 count += 1;
             }
         }
@@ -420,7 +414,7 @@ fn update_script_metadata(
         write_keyframes_section(&mut buffer, &stats.keyframes, metadata_size_diff)?;
 
         // close script data object
-        amf0::Amf0Encoder::object_eof(&mut buffer).unwrap();
+        amf0::Amf0Encoder::object_eof(&mut buffer)?;
 
         buffer.flush()?;
 

@@ -1,12 +1,12 @@
-use crate::error::ParseError;
+use crate::error::AppError;
 use std::fmt::Write;
 
 /// Function to parse time with units
-pub fn parse_time(time_str: &str) -> Result<f64, ParseError> {
+pub fn parse_time(time_str: &str) -> Result<f64, AppError> {
     // Trim whitespace and handle empty string
     let time_str = time_str.trim();
     if time_str.is_empty() {
-        return Err(ParseError::InvalidFormat);
+        return Err(AppError::ParseError("Invalid format: empty string".to_string()));
     }
 
     // Try to parse as a simple number (seconds) first for efficiency
@@ -28,7 +28,7 @@ pub fn parse_time(time_str: &str) -> Result<f64, ParseError> {
         // The entire string is numbers or decimal points
         return time_str
             .parse::<f64>()
-            .map_err(|_| ParseError::InvalidNumber);
+            .map_err(|_| AppError::ParseError("Invalid number".to_string()));
     }
 
     // Split the string into numeric and unit parts
@@ -38,14 +38,14 @@ pub fn parse_time(time_str: &str) -> Result<f64, ParseError> {
     // Parse the numeric part
     let value = numeric_part
         .parse::<f64>()
-        .map_err(|_| ParseError::InvalidNumber)?;
+        .map_err(|_| AppError::ParseError("Invalid number".to_string()))?;
 
     // Parse the unit and convert to seconds
     match unit_part.as_str() {
         "s" => Ok(value),
         "m" => Ok(value * 60.0),
         "h" => Ok(value * 3600.0),
-        _ => Err(ParseError::InvalidUnit),
+        _ => Err(AppError::ParseError("Invalid unit".to_string())),
     }
 }
 

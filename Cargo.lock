@@ -1816,6 +1816,7 @@ dependencies = [
  "mesio-engine",
  "pipeline-common",
  "reqwest",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
