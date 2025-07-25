@@ -1,19 +1,19 @@
-use std::str::FromStr;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Parser;
 use config::ProgramConfig;
 use error::AppError;
-use flv_fix::PipelineConfig;
+use flv_fix::FlvPipelineConfig;
 use flv_fix::RepairStrategy;
 use flv_fix::ScriptFillerConfig;
+use hls_fix::HlsPipelineConfig;
 use indicatif::MultiProgress;
 use mesio_engine::flv::FlvConfig;
 use mesio_engine::{DownloaderConfig, HlsProtocolBuilder, ProxyAuth, ProxyConfig, ProxyType};
-use output::provider::OutputFormat;
-use tracing::{error, info, Level};
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use pipeline_common::config::PipelineConfig;
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 mod cli;
 mod config;
@@ -24,7 +24,7 @@ mod utils;
 
 use cli::CliArgs;
 use utils::progress::ProgressManager;
-use utils::{format_bytes, format_duration, parse_size, parse_time};
+use utils::{parse_size, parse_time};
 
 fn main() {
     if let Err(e) = bootstrap() {
@@ -73,23 +73,19 @@ async fn bootstrap() -> Result<(), AppError> {
     info!("GitHub: https://github.com/hua0512/rust-srec");
     info!("==================================================================");
 
-    // Parse size and duration with units
+    // Max size in bytes
     let file_size_limit = parse_size(&args.max_size)?;
 
-    let duration_limit = parse_time(&args.max_duration)?;
+    // Max duration in seconds
+    let duration_limit_s = parse_time(&args.max_duration)?;
 
-    // Log the parsed values
-    if file_size_limit > 0 {
-        info!("File size limit set to {}", format_bytes(file_size_limit));
-    } else {
-        info!("No file size limit set");
-    }
+    let pipeline_config = PipelineConfig::builder()
+        .max_file_size(file_size_limit)
+        .max_duration_s(duration_limit_s)
+        .channel_size(args.channel_size)
+        .build();
 
-    if duration_limit > 0.0 {
-        info!("Duration limit set to {}", format_duration(duration_limit));
-    } else {
-        info!("No duration limit set");
-    }
+    info!("{pipeline_config}");
 
     // Log HTTP timeout settings
     info!(
@@ -97,18 +93,16 @@ async fn bootstrap() -> Result<(), AppError> {
         args.timeout, args.connect_timeout, args.read_timeout, args.write_timeout
     );
 
-    // Configure pipeline
-    let pipeline_config = PipelineConfig {
-        duplicate_tag_filtering: false,
-        file_size_limit,
-        duration_limit,
-        repair_strategy: RepairStrategy::Strict, // Fixed to Strict
-        continuity_mode: flv_fix::ContinuityMode::Reset, // Fixed to Reset
-        keyframe_index_config: if args.keyframe_index {
-            if duration_limit > 0.0 {
+    // Configure flv pipeline config
+    let flv_pipeline_config = FlvPipelineConfig::builder()
+        .duplicate_tag_filtering(false)
+        .repair_strategy(RepairStrategy::Strict)
+        .continuity_mode(flv_fix::ContinuityMode::Reset)
+        .keyframe_index_config(if args.keyframe_index {
+            if duration_limit_s > 0.0 {
                 info!("Keyframe index will be injected into metadata for better seeking");
                 Some(ScriptFillerConfig {
-                    keyframe_duration_ms: (duration_limit * 1000.0) as u32,
+                    keyframe_duration_ms: (duration_limit_s * 1000.0) as u32,
                 })
             } else {
                 info!("Keyframe index enabled with default configuration");
@@ -116,8 +110,11 @@ async fn bootstrap() -> Result<(), AppError> {
             }
         } else {
             None
-        },
-    };
+        })
+        .build();
+
+    // Configure HLS pipeline config
+    let hls_pipeline_config = HlsPipelineConfig::builder().build();
 
     // Determine output directory
     let output_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("./fix"));
@@ -192,29 +189,32 @@ async fn bootstrap() -> Result<(), AppError> {
     };
 
     // Create common download configuration
-    let download_config = DownloaderConfig {
-        // do not cache by default
-        cache_config: None,
-        timeout: Duration::from_secs(args.timeout),
-        connect_timeout: Duration::from_secs(args.connect_timeout),
-        read_timeout: Duration::from_secs(args.read_timeout),
-        write_timeout: Duration::from_secs(args.write_timeout),
-        follow_redirects: true,
-        headers: crate::utils::parse_headers(&args.headers),
-        proxy: proxy_config,
-        use_system_proxy: args.use_system_proxy,
-        ..DownloaderConfig::default()
+    let download_config = {
+        let mut builder = DownloaderConfig::builder()
+            .with_timeout(Duration::from_secs(args.timeout))
+            .with_connect_timeout(Duration::from_secs(args.connect_timeout))
+            .with_read_timeout(Duration::from_secs(args.read_timeout))
+            .with_write_timeout(Duration::from_secs(args.write_timeout))
+            .with_headers(crate::utils::parse_headers(&args.headers))
+            .with_caching_enabled(false);
+
+        if let Some(proxy) = proxy_config {
+            builder = builder.with_proxy(proxy);
+        } else {
+            builder = builder.with_system_proxy(args.use_system_proxy);
+        }
+        builder.build()
     };
 
     // Create FLV-specific configuration
-    let flv_config = FlvConfig {
-        base: download_config.clone(),
-        buffer_size: args.download_buffer,
-    };
+    let flv_config = FlvConfig::builder()
+        .with_base_config(download_config.clone())
+        .buffer_size(args.download_buffer)
+        .build();
 
     // Create HLS-specific configuration
     let hls_config = HlsProtocolBuilder::new()
-        .with_base_config(download_config.clone())
+        .with_base_config(download_config)
         .download_concurrency(
             args.hls_concurrency
                 .try_into()
@@ -223,28 +223,22 @@ async fn bootstrap() -> Result<(), AppError> {
         .segment_retry_count(args.hls_retries)
         .get_config();
 
-    let output_format = OutputFormat::from_str(&args.output_format).map_err(|_| {
-        AppError::InvalidInput(format!(
-            "Invalid output format: '{}'",
-            args.output_format
-        ))
-    })?;
-
     // Create the program configuration
-    let mut program_config = ProgramConfig {
-        pipeline_config,
-        flv_config: Some(flv_config),
-        hls_config: Some(hls_config),
-        enable_processing: args.enable_fix,
-        channel_size: args.buffer_size,
-        output_format: Some(output_format),
-    };
+    let program_config = ProgramConfig::builder()
+        .pipeline_config(pipeline_config)
+        .flv_pipeline_config(flv_pipeline_config)
+        .hls_pipeline_config(hls_pipeline_config)
+        .flv_config(flv_config)
+        .hls_config(hls_config)
+        .enable_processing(args.enable_fix)
+        .build()
+        .map_err(|err| AppError::InvalidInput(err.to_string()))?;
 
     // Process input files
     processor::process_inputs(
         &args.input,
         &output_dir,
-        &mut program_config,
+        &program_config,
         &args.output_name_template,
         Some(Arc::new(move |event| {
             progress_manager.handle_event(event);

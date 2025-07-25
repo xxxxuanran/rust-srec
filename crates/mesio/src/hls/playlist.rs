@@ -6,10 +6,9 @@ use crate::hls::HlsDownloaderError;
 use crate::hls::config::{HlsConfig, HlsVariantSelectionPolicy};
 use crate::hls::scheduler::ScheduledSegmentJob;
 use async_trait::async_trait;
-use lru::LruCache;
 use m3u8_rs::{MasterPlaylist, MediaPlaylist, parse_playlist_res};
+use moka::future::Cache;
 use reqwest::Client;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -82,9 +81,7 @@ impl PlaylistProvider for PlaylistEngine {
                     ))
                 })?;
                 let base_url_obj = playlist_url.join(".").map_err(|e| {
-                    HlsDownloaderError::PlaylistError(format!(
-                        "Failed to determine base URL: {e}"
-                    ))
+                    HlsDownloaderError::PlaylistError(format!("Failed to determine base URL: {e}"))
                 })?;
                 let base_url = base_url_obj.to_string();
                 return match parse_playlist_res(playlist_content.as_bytes()) {
@@ -301,8 +298,9 @@ impl PlaylistProvider for PlaylistEngine {
 
         /// The LRU cache capacity for seen segments.
         const SEEN_SEGMENTS_LRU_CAPACITY: usize = 20;
-        let mut seen_segment_uris: LruCache<String, ()> =
-            LruCache::new(NonZeroUsize::new(SEEN_SEGMENTS_LRU_CAPACITY).unwrap());
+        let seen_segment_uris: Cache<String, ()> = Cache::builder()
+            .max_capacity(SEEN_SEGMENTS_LRU_CAPACITY as u64)
+            .build();
 
         let mut last_map_uri: Option<String> = None;
 
@@ -416,8 +414,8 @@ impl PlaylistProvider for PlaylistEngine {
                                     }
                                 };
 
-                                if seen_segment_uris.get(&absolute_segment_uri).is_none() {
-                                    seen_segment_uris.put(absolute_segment_uri.clone(), ());
+                                if !seen_segment_uris.contains_key(&absolute_segment_uri) {
+                                    seen_segment_uris.insert(absolute_segment_uri.clone(), ()).await;
                                     debug!("New segment detected: {}", absolute_segment_uri);
                                     let job = ScheduledSegmentJob {
                                         segment_uri: absolute_segment_uri,
