@@ -8,3 +8,12 @@ bytes = "1.10.1"
 byteorder = "1.5"
 expgolomb = { path = "../expgolomb" }
 bytes-util = { path = "../bytes-util" }
+bitflags = "2.9.0"
+
+
+[dev-dependencies]
+insta = "1.42"
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

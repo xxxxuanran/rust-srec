@@ -3,7 +3,7 @@ use std::io;
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
 use bytes_util::BytesCursorExt;
-use h265::{HEVCDecoderConfigurationRecord, NaluType};
+use h265::{HEVCDecoderConfigurationRecord, NALUnitType};
 
 use crate::resolution::Resolution;
 
@@ -86,16 +86,18 @@ impl HevcPacket {
                 config
                     .arrays
                     .iter()
-                    .find(|array| array.nal_unit_type == NaluType::Sps)
+                    .find(|array| array.nal_unit_type == NALUnitType::SpsNut)
                     .and_then(|sps_array| sps_array.nalus.first())
                     .and_then(|sps| {
                         if sps.len() < 4 {
                             return None;
                         }
-                        h265::Sps::parse(sps.clone()).ok().map(|sps| Resolution {
-                            width: sps.width as f32,
-                            height: sps.height as f32,
-                        })
+                        h265::SpsNALUnit::parse(std::io::Cursor::new(sps.clone()))
+                            .ok()
+                            .map(|sps_nalu| Resolution {
+                                width: sps_nalu.rbsp.pic_width_in_luma_samples.get() as f32,
+                                height: sps_nalu.rbsp.pic_height_in_luma_samples.get() as f32,
+                            })
                     })
             }
             _ => None,

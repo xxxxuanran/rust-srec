@@ -169,8 +169,11 @@ impl ResolutionDetector {
                     }
                 }
                 StreamType::H265 => {
-                    if let Ok(sps) = h265::Sps::parse(sps_data) {
-                        return Some(Resolution::new(sps.width as u32, sps.height as u32));
+                    if let Ok(sps) = h265::SpsNALUnit::parse(std::io::Cursor::new(sps_data)) {
+                        return Some(Resolution::new(
+                            sps.rbsp.pic_width_in_luma_samples.get() as u32,
+                            sps.rbsp.pic_height_in_luma_samples.get() as u32,
+                        ));
                     }
                 }
                 _ => {}
@@ -299,8 +302,11 @@ impl ResolutionDetector {
             StreamType::H265 => {
                 let sps_nal_units = Self::find_h265_sps_nal_units(elementary_stream);
                 for sps_data in sps_nal_units {
-                    if let Ok(sps) = h265::Sps::parse(sps_data) {
-                        return Some(Resolution::new(sps.width as u32, sps.height as u32));
+                    if let Ok(sps) = h265::SpsNALUnit::parse(std::io::Cursor::new(sps_data)) {
+                        return Some(Resolution::new(
+                            sps.rbsp.pic_width_in_luma_samples.get() as u32,
+                            sps.rbsp.pic_height_in_luma_samples.get() as u32,
+                        ));
                     }
                 }
             }

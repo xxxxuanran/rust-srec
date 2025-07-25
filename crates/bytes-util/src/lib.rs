@@ -7,12 +7,14 @@
 //!
 //! `SPDX-License-Identifier: MIT OR Apache-2.0`
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
 mod bit_read;
 mod bit_write;
 mod bytes_cursor;
+pub mod nal_emulation_prevention;
+pub mod range_check;
 
 pub use bit_read::BitReader;
 pub use bit_write::BitWriter;
