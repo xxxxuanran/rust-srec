@@ -57,6 +57,7 @@ pub enum MediaFormat {
     Flv,
     Ts,
     Mp4,
+    Fmp4,
 }
 
 impl MediaFormat {
@@ -65,6 +66,7 @@ impl MediaFormat {
             MediaFormat::Flv => "flv",
             MediaFormat::Ts => "ts",
             MediaFormat::Mp4 => "mp4",
+            MediaFormat::Fmp4 => "fmp4",
         }
     }
 
@@ -72,7 +74,8 @@ impl MediaFormat {
         match s.to_lowercase().as_str() {
             "flv" => MediaFormat::Flv,
             "ts" => MediaFormat::Ts,
-            "fmp4" | "mp4" => MediaFormat::Mp4,
+            "mp4" => MediaFormat::Mp4,
+            "fmp4" => MediaFormat::Fmp4,
             _ => MediaFormat::Flv,
         }
     }

@@ -221,19 +221,19 @@ impl Bilibili {
                                 .unwrap_or("");
 
                             let quality_desc = quality_map.get(&qn).copied().unwrap_or("Unknown");
-                            let quality = format!("{} - {} - {}", quality_desc, c.codec_name, cdn);
 
                             let bitrate = if qn < 1000 { qn as u64 * 10 } else { qn as u64 };
                             streams.push(StreamInfo {
                                 url,
                                 stream_format: protocol_name,
                                 media_format: MediaFormat::from_extension(&f.format_name),
-                                quality,
+                                quality: quality_desc.to_string(),
                                 bitrate,
                                 priority: 0,
                                 extras: Some(serde_json::json!({
                                     "qn": qn,
                                     "rid": room_id,
+                                    "cdn": cdn,
                                 })),
                                 codec: c.codec_name.to_string(),
                                 fps: 0.0,

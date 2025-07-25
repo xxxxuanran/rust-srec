@@ -43,7 +43,7 @@ impl Huya {
     const MP_URL: &'static str = "https://mp.huya.com/cache.php";
     // WUP User-Agent for Huya
     const WUP_UA: &'static str =
-        "HYSDK(Windows, 30000002)_APP(pc_exe&6090003&official)_SDK(trans&2.24.0.5030)";
+        "HYSDK(Windows, 30000002)_APP(pc_exe&6090007&official)_SDK(trans&2.24.0.5157)";
 
     pub fn new(
         platform_url: String,
@@ -459,8 +459,8 @@ impl Huya {
                         continue;
                     }
                     let quality = format!(
-                        "{} ({})",
-                        bitrate_info.s_display_name, stream_info.s_cdn_type
+                        "{}",
+                        bitrate_info.s_display_name
                     );
                     add_streams_for_bitrate(
                         &mut streams,

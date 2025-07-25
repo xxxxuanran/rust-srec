@@ -61,7 +61,13 @@ pub trait HlsExtractor {
                 let media_format = if pl
                     .segments
                     .iter()
-                    .any(|s| s.uri.contains("fmp4") || s.uri.contains(".mp4"))
+                    .any(|s| s.uri.contains("fmp4") || s.uri.contains(".m4s"))
+                {
+                    MediaFormat::Fmp4
+                } else if pl
+                    .segments
+                    .iter()
+                    .any(|s| s.uri.contains(".mp4"))
                 {
                     MediaFormat::Mp4
                 } else {
@@ -101,7 +107,7 @@ fn process_master_playlist(
 
             // debug!("variant: {:?}", variant);
             let video = variant.video.unwrap_or_default();
-            let video = if video == "chunked" {
+            let video = if video == "chunked" || video.is_empty() {
                 "Source".to_string()
             } else {
                 video

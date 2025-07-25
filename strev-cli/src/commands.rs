@@ -196,45 +196,37 @@ impl CommandExecutor {
 
             let task = tokio::spawn(async move {
                 let _permit = permit;
-
                 pb.set_message(format!("Processing: {url}"));
 
-                let result = match timeout(timeout_duration, async {
+                let result = timeout(timeout_duration, async {
                     let factory = factory_with_proxy(proxy_config);
                     let extractor = factory.create_extractor(&url, None, None)?;
-                    // Extract media info directly using the platforms API
                     let mut media_info = extractor.extract().await?;
 
                     if media_info.streams.is_empty() {
                         return Err(CliError::no_streams_found());
                     }
 
-                    let selected_stream = if auto_select {
-                        // Find the index of the stream with max priority
-                        let (index, _) = media_info
+                    let stream_index = if auto_select {
+                        media_info
                             .streams
                             .iter()
                             .enumerate()
                             .max_by_key(|(_, s)| s.priority)
-                            .unwrap_or((0, &media_info.streams[0]));
-
-                        media_info.streams.swap_remove(index)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0)
                     } else {
-                        media_info.streams.swap_remove(0)
+                        0
                     };
 
-                    // Get the true URL
-                    let mut final_stream = selected_stream;
-                    extractor.get_url(&mut final_stream).await?;
+                    let mut selected_stream = media_info.streams.swap_remove(stream_index);
+                    extractor.get_url(&mut selected_stream).await?;
 
-                    Ok((media_info, final_stream))
+                    Ok((media_info, selected_stream))
                 })
                 .await
-                {
-                    Ok(Ok(result)) => Ok(result),
-                    Ok(Err(e)) => Err(e),
-                    Err(_) => Err(CliError::timeout()),
-                };
+                .map_err(|_| CliError::timeout())
+                .and_then(|r| r);
 
                 pb.inc(1);
                 (index, url, result)
@@ -424,13 +416,37 @@ impl CommandExecutor {
                 .iter()
                 .enumerate()
                 .map(|(i, stream)| {
-                    format!(
-                        "{}: {} - {} ({})",
-                        i + 1,
-                        stream.quality,
-                        stream.stream_format,
-                        stream.codec
-                    )
+                    if let Some(extras) = &stream.extras {
+                        if let Some(cdn) = extras.get("cdn").and_then(|v| v.as_str()) {
+                            format!(
+                                "{}: {} - {}/{} ({}) [{}]",
+                                i + 1,
+                                stream.quality,
+                                stream.stream_format,
+                                stream.media_format,
+                                stream.codec,
+                                cdn
+                            )
+                        } else {
+                            format!(
+                                "{}: {} - {}/{} ({})",
+                                i + 1,
+                                stream.quality,
+                                stream.stream_format,
+                                stream.media_format,
+                                stream.codec
+                            )
+                        }
+                    } else {
+                        format!(
+                            "{}: {} - {}/{} ({})",
+                            i + 1,
+                            stream.quality,
+                            stream.stream_format,
+                            stream.media_format,
+                            stream.codec
+                        )
+                    }
                 })
                 .collect();
 
