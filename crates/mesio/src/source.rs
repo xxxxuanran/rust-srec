@@ -4,6 +4,7 @@
 //! It supports different strategies for source selection, source health tracking,
 //! and automatic failover.
 
+use crate::DownloadError;
 use rand::Rng;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -204,8 +205,13 @@ impl SourceManager {
         }
 
         if self.sources.len() == 1 {
-            // If only one source, return it directly
-            return Some(self.sources[0].clone());
+            let source = &self.sources[0];
+            let is_active = self.health.get(&source.url).is_some_and(|h| h.active);
+            if is_active {
+                return Some(source.clone());
+            } else {
+                return None; // The only source is inactive
+            }
         }
 
         // Select a source based on the strategy
@@ -271,13 +277,6 @@ impl SourceManager {
             }
         }
 
-        // If all sources are inactive, try using the original next source
-        if checked == self.sources.len() && !self.sources.is_empty() {
-            let source = self.sources[self.current_index].clone();
-            self.current_index = (self.current_index + 1) % self.sources.len();
-            return Some(source);
-        }
-
         None
     }
 
@@ -307,9 +306,8 @@ impl SourceManager {
             .collect();
 
         if active_sources.is_empty() {
-            // If no active sources, choose from all sources
-            let index = rand::rng().random_range(0..self.sources.len());
-            Some(self.sources[index].clone())
+            // If no active sources, return None
+            None
         } else {
             // Choose a random active source
             let index = rand::rng().random_range(0..active_sources.len());
@@ -317,8 +315,37 @@ impl SourceManager {
         }
     }
 
+    /// Record a successful request to a source
+    pub fn record_success(&mut self, url: &str, response_time: Duration) {
+        self.record_result(url, true, response_time);
+    }
+
+    /// Record a failed request to a source and update health
+    pub fn record_failure(&mut self, url: &str, error: &DownloadError, response_time: Duration) {
+        // Deactivate source permanently on client errors (4xx)
+        if let DownloadError::StatusCode(status) = error {
+            if status.is_client_error() {
+                self.set_source_active(url, false);
+            }
+        } else if let DownloadError::HlsError(hls_err) = error {
+            // Specific handling for HLS errors that might contain a client error
+            let is_client_error = match hls_err {
+                crate::hls::HlsDownloaderError::PlaylistError(msg) => msg.contains("HTTP 4"),
+                crate::hls::HlsDownloaderError::NetworkError { source } => {
+                    source.status().is_some_and(|s| s.is_client_error())
+                }
+                _ => false,
+            };
+            if is_client_error {
+                self.set_source_active(url, false);
+            }
+        }
+
+        self.record_result(url, false, response_time);
+    }
+
     /// Record the result of a request to a source
-    pub fn record_result(&mut self, url: &str, success: bool, response_time: Duration) {
+    fn record_result(&mut self, url: &str, success: bool, response_time: Duration) {
         let health = self.health.entry(url.to_string()).or_default();
 
         // Update success/failure counts

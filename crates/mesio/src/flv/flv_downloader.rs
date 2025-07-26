@@ -282,13 +282,13 @@ impl FlvDownloader {
             Ok(stream) => {
                 // Record success for this source
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, true, elapsed);
+                source_manager.record_success(&source.url, elapsed);
                 Ok(stream)
             }
             Err(err) => {
                 // Record failure for this source
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, false, elapsed);
+                source_manager.record_failure(&source.url, &err, elapsed);
 
                 warn!(
                     url = %source.url,
@@ -361,13 +361,13 @@ impl FlvDownloader {
             Ok(stream) => {
                 // Record success
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, true, elapsed);
+                source_manager.record_success(&source.url, elapsed);
                 Ok(stream)
             }
             Err(err) => {
                 // Record failure
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, false, elapsed);
+                source_manager.record_failure(&source.url, &err, elapsed);
                 Err(err)
             }
         }
@@ -386,13 +386,13 @@ impl FlvDownloader {
             Ok(stream) => {
                 // Record success for this source
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, true, elapsed);
+                source_manager.record_success(&source.url, elapsed);
                 Ok(stream)
             }
             Err(err) => {
                 // Record failure for this source
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, false, elapsed);
+                source_manager.record_failure(&source.url, &err, elapsed);
 
                 warn!(
                     url = %source.url,
@@ -466,13 +466,13 @@ impl FlvDownloader {
             Ok(stream) => {
                 // Record success
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, true, elapsed);
+                source_manager.record_success(&source.url, elapsed);
                 Ok(stream)
             }
             Err(err) => {
                 // Record failure
                 let elapsed = start_time.elapsed();
-                source_manager.record_result(&source.url, false, elapsed);
+                source_manager.record_failure(&source.url, &err, elapsed);
                 Err(err)
             }
         }
@@ -517,19 +517,19 @@ impl MultiSource for FlvDownloader {
         url: &str,
         source_manager: &mut SourceManager,
     ) -> Result<Self::Stream, DownloadError> {
-        // Try sources
         if !source_manager.has_sources() {
-            // If no sources are configured, just use the provided URL
             source_manager.add_url(url, 0);
         }
 
         let mut last_error = None;
 
-        // Try sources until one succeeds
+        // Try sources until one succeeds or all active sources are tried
         while let Some(source) = source_manager.select_source() {
             match self.try_download_from_source(&source, source_manager).await {
                 Ok(stream) => return Ok(stream),
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error = Some(err);
+                }
             }
         }
 

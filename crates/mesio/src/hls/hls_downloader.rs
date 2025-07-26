@@ -1,4 +1,7 @@
+use crate::source::ContentSource;
 use std::sync::Arc;
+use std::time::Instant;
+use tracing::warn;
 
 use crate::media_protocol::{Cacheable, MultiSource};
 use futures::StreamExt;
@@ -39,6 +42,34 @@ impl HlsDownloader {
         &self.client
     }
 
+    async fn try_download_from_source(
+        &self,
+        source: &ContentSource,
+        source_manager: &mut SourceManager,
+    ) -> Result<BoxMediaStream<HlsData, HlsDownloaderError>, DownloadError> {
+        let start_time = Instant::now();
+        match self
+            .perform_download(&source.url, Some(source_manager), None)
+            .await
+        {
+            Ok(stream) => {
+                let elapsed = start_time.elapsed();
+                source_manager.record_success(&source.url, elapsed);
+                Ok(stream)
+            }
+            Err(err) => {
+                let elapsed = start_time.elapsed();
+                source_manager.record_failure(&source.url, &err, elapsed);
+                warn!(
+                    url = %source.url,
+                    error = %err,
+                    "Failed to download from source"
+                );
+                Err(err)
+            }
+        }
+    }
+
     pub async fn perform_download(
         &self,
         url: &str,
@@ -53,7 +84,7 @@ impl HlsDownloader {
             cache_manager,
         )
         .await
-        .map_err(|e| DownloadError::HlsError(e))?;
+        .map_err(DownloadError::HlsError)?;
 
         let stream = ReceiverStream::new(client_event_rx);
 
@@ -98,30 +129,28 @@ impl Download for HlsDownloader {
 impl MultiSource for HlsDownloader {
     async fn download_with_sources(
         &self,
-        url: &str, // This is the primary/initial URL
+        url: &str,
         source_manager: &mut SourceManager,
     ) -> Result<Self::Stream, DownloadError> {
-        // Attempt to download using the initial url.
-        match self.perform_download(url, Some(source_manager), None).await {
-            Ok(stream) => Ok(stream),
-            Err(mut last_error) => {
-                // If the initial attempt fails, iterate through sources obtained from
-                // the source_manager.select_source() method.
-                // The loop should continue until a download is successful or
-                // source_manager.select_source() returns None.
-                while let Some(content_source) = source_manager.select_source() {
-                    // Assuming select_source() returns Option<ContentSource> where ContentSource has a url: String.
-                    match self.perform_download(&content_source.url, None, None).await {
-                        Ok(stream) => return Ok(stream), // Return the Result<Self::Stream, DownloadError> from the first successful download
-                        Err(err) => {
-                            last_error = err; // Update to the latest error and try next source
-                        }
-                    }
+        if !source_manager.has_sources() {
+            source_manager.add_url(url, 0);
+        }
+
+        let mut last_error: Option<DownloadError> = None;
+
+        while let Some(content_source) = source_manager.select_source() {
+            match self
+                .try_download_from_source(&content_source, source_manager)
+                .await
+            {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    last_error = Some(err);
                 }
-                // Or an appropriate error if all sources fail.
-                Err(last_error)
             }
         }
+        Err(last_error
+            .unwrap_or_else(|| DownloadError::NoSource("No source available".to_string())))
     }
 }
 
