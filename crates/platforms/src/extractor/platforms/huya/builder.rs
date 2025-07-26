@@ -458,10 +458,7 @@ impl Huya {
                     if bitrate_info.s_display_name.contains("HDR") {
                         continue;
                     }
-                    let quality = format!(
-                        "{}",
-                        bitrate_info.s_display_name
-                    );
+                    let quality = format!("{}", bitrate_info.s_display_name);
                     add_streams_for_bitrate(
                         &mut streams,
                         &quality,

@@ -45,7 +45,10 @@ pub struct ProfileTierLevel {
 }
 
 impl ProfileTierLevel {
-    pub(crate) fn parse<R: io::Read>(bit_reader: &mut BitReader<R>, max_num_sub_layers_minus_1: u8) -> io::Result<Self> {
+    pub(crate) fn parse<R: io::Read>(
+        bit_reader: &mut BitReader<R>,
+        max_num_sub_layers_minus_1: u8,
+    ) -> io::Result<Self> {
         // When parsing SPSs, the profile_present_flag is always true. (See 7.3.2.2.1)
         // Since this decoder only supports SPS decoding, it is assumed to be true here.
 
@@ -53,8 +56,10 @@ impl ProfileTierLevel {
         // inbld_flag is inferred to be 0 when not present for the genral profile
         general_profile.inbld_flag = Some(general_profile.inbld_flag.unwrap_or(false));
 
-        let mut sub_layer_profile_present_flags = Vec::with_capacity(max_num_sub_layers_minus_1 as usize);
-        let mut sub_layer_level_present_flags = Vec::with_capacity(max_num_sub_layers_minus_1 as usize);
+        let mut sub_layer_profile_present_flags =
+            Vec::with_capacity(max_num_sub_layers_minus_1 as usize);
+        let mut sub_layer_level_present_flags =
+            Vec::with_capacity(max_num_sub_layers_minus_1 as usize);
         for _ in 0..max_num_sub_layers_minus_1 {
             sub_layer_profile_present_flags.push(bit_reader.read_bit()?); // sub_layer_profile_present_flag
             sub_layer_level_present_flags.push(bit_reader.read_bit()?); // sub_layer_level_present_flag
@@ -70,7 +75,10 @@ impl ProfileTierLevel {
 
         for i in 0..max_num_sub_layers_minus_1 as usize {
             if sub_layer_profile_present_flags[i] {
-                sub_layer_profiles[i] = Some(Profile::parse(bit_reader, sub_layer_level_present_flags[i])?);
+                sub_layer_profiles[i] = Some(Profile::parse(
+                    bit_reader,
+                    sub_layer_level_present_flags[i],
+                )?);
             }
 
             if sub_layer_level_present_flags[i] {
@@ -163,11 +171,13 @@ impl Profile {
         let tier_flag = bit_reader.read_bit()?;
         let profile_idc = bit_reader.read_bits(5)? as u8;
 
-        let profile_compatibility_flag = ProfileCompatibilityFlags::from_bits_retain(bit_reader.read_u32::<BigEndian>()?);
+        let profile_compatibility_flag =
+            ProfileCompatibilityFlags::from_bits_retain(bit_reader.read_u32::<BigEndian>()?);
 
         let check_profile_idcs = |profiles: ProfileCompatibilityFlags| {
-            profiles.contains(ProfileCompatibilityFlags::from_bits_retain(1 << profile_idc))
-                || profile_compatibility_flag.intersects(profiles)
+            profiles.contains(ProfileCompatibilityFlags::from_bits_retain(
+                1 << profile_idc,
+            )) || profile_compatibility_flag.intersects(profiles)
         };
 
         let progressive_source_flag = bit_reader.read_bit()?;

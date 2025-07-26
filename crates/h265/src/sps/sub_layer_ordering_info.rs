@@ -38,7 +38,9 @@ impl SubLayerOrderingInfo {
                 sps_max_dec_pic_buffering_minus1[i] = bit_reader.read_exp_golomb()?;
                 // (A-2) defines MaxDpbSize which is always at most 16
                 range_check!(sps_max_dec_pic_buffering_minus1[i], 0, 16)?;
-                if i > 0 && sps_max_dec_pic_buffering_minus1[i] < sps_max_dec_pic_buffering_minus1[i - 1] {
+                if i > 0
+                    && sps_max_dec_pic_buffering_minus1[i] < sps_max_dec_pic_buffering_minus1[i - 1]
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "sps_max_dec_pic_buffering_minus1[i] must be greater than or equal to sps_max_dec_pic_buffering_minus1[i-1]",
@@ -46,7 +48,11 @@ impl SubLayerOrderingInfo {
                 }
 
                 sps_max_num_reorder_pics[i] = bit_reader.read_exp_golomb()?;
-                range_check!(sps_max_num_reorder_pics[i], 0, sps_max_dec_pic_buffering_minus1[i])?;
+                range_check!(
+                    sps_max_num_reorder_pics[i],
+                    0,
+                    sps_max_dec_pic_buffering_minus1[i]
+                )?;
                 if i > 0 && sps_max_num_reorder_pics[i] < sps_max_num_reorder_pics[i - 1] {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -70,7 +76,11 @@ impl SubLayerOrderingInfo {
             sps_max_dec_pic_buffering_minus1.fill(sps_max_dec_pic_buffering_minus1_i);
 
             let sps_max_num_reorder_pics_i = bit_reader.read_exp_golomb()?;
-            range_check!(sps_max_num_reorder_pics_i, 0, sps_max_dec_pic_buffering_minus1_i)?;
+            range_check!(
+                sps_max_num_reorder_pics_i,
+                0,
+                sps_max_dec_pic_buffering_minus1_i
+            )?;
             sps_max_num_reorder_pics.fill(sps_max_num_reorder_pics_i);
 
             let sps_max_latency_increase_plus1_i = bit_reader.read_exp_golomb()?;
@@ -112,6 +122,9 @@ impl SubLayerOrderingInfo {
     ///
     /// ISO/IEC 23008-2 - 7.4.3.2
     pub fn sps_max_latency_pictures_at(&self, i: usize) -> Option<u64> {
-        Some(self.sps_max_num_reorder_pics.get(i)? + self.sps_max_latency_increase_plus1.get(i)?.checked_sub(1)? as u64)
+        Some(
+            self.sps_max_num_reorder_pics.get(i)?
+                + self.sps_max_latency_increase_plus1.get(i)?.checked_sub(1)? as u64,
+        )
     }
 }

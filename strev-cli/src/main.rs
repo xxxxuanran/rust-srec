@@ -47,14 +47,15 @@ async fn run() -> Result<()> {
     println!("███████║   ██║   ██║  ██║███████╗ ╚████╔╝ ");
     println!("╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝  ╚═══╝  ");
     println!("");
-    println!("Streev - CLI tool for streaming media extraction and retrieval from various platforms");
+    println!(
+        "Streev - CLI tool for streaming media extraction and retrieval from various platforms"
+    );
     println!("GitHub: https://github.com/hua0512/rust-srec");
     println!("==================================================================");
     println!("");
 
     // Initialize logging
     init_logging(args.verbose, args.quiet)?;
-
 
     // Load configuration
     let config = AppConfig::load(args.config.as_deref())?;

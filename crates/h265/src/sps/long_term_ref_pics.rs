@@ -24,10 +24,12 @@ impl LongTermRefPics {
         range_check!(num_long_term_ref_pics_sps, 0, 32)?;
 
         let mut lt_ref_pic_poc_lsb_sps = Vec::with_capacity(num_long_term_ref_pics_sps as usize);
-        let mut used_by_curr_pic_lt_sps_flag = Vec::with_capacity(num_long_term_ref_pics_sps as usize);
+        let mut used_by_curr_pic_lt_sps_flag =
+            Vec::with_capacity(num_long_term_ref_pics_sps as usize);
 
         for _ in 0..num_long_term_ref_pics_sps {
-            lt_ref_pic_poc_lsb_sps.push(bit_reader.read_bits(log2_max_pic_order_cnt_lsb_minus4 + 4)?);
+            lt_ref_pic_poc_lsb_sps
+                .push(bit_reader.read_bits(log2_max_pic_order_cnt_lsb_minus4 + 4)?);
             used_by_curr_pic_lt_sps_flag.push(bit_reader.read_bit()?);
         }
 

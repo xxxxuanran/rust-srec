@@ -415,7 +415,9 @@ impl PlaylistProvider for PlaylistEngine {
                                 };
 
                                 if !seen_segment_uris.contains_key(&absolute_segment_uri) {
-                                    seen_segment_uris.insert(absolute_segment_uri.clone(), ()).await;
+                                    seen_segment_uris
+                                        .insert(absolute_segment_uri.clone(), ())
+                                        .await;
                                     debug!("New segment detected: {}", absolute_segment_uri);
                                     let job = ScheduledSegmentJob {
                                         segment_uri: absolute_segment_uri,

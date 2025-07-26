@@ -79,17 +79,20 @@ impl ScalingListData {
                             scaling_column[matrix_id][0..16].copy_from_slice(&TABLE_7_5);
                         } else {
                             let end = usize::min(63, (1 << (4 + (size_id << 1))) - 1);
-                            scaling_column[matrix_id][0..end].copy_from_slice(&TABLE_7_6[matrix_id][0..end]);
+                            scaling_column[matrix_id][0..end]
+                                .copy_from_slice(&TABLE_7_6[matrix_id][0..end]);
                         }
                     } else {
                         // the scaling list is inferred from the reference scaling list
                         if size_id == 0 {
                             scaling_column[matrix_id][0..16].copy_from_slice(&TABLE_7_5);
                         } else {
-                            let ref_matrix_id =
-                                matrix_id - scaling_list_pred_matrix_id_delta * (if size_id == 3 { 3 } else { 1 });
+                            let ref_matrix_id = matrix_id
+                                - scaling_list_pred_matrix_id_delta
+                                    * (if size_id == 3 { 3 } else { 1 });
                             let end = usize::min(63, (1 << (4 + (size_id << 1))) - 1);
-                            scaling_column[matrix_id][0..end].copy_from_slice(&TABLE_7_6[ref_matrix_id][0..end]);
+                            scaling_column[matrix_id][0..end]
+                                .copy_from_slice(&TABLE_7_6[ref_matrix_id][0..end]);
                         }
                     }
                 } else {

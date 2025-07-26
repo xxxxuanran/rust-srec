@@ -64,11 +64,7 @@ pub trait HlsExtractor {
                     .any(|s| s.uri.contains("fmp4") || s.uri.contains(".m4s"))
                 {
                     MediaFormat::Fmp4
-                } else if pl
-                    .segments
-                    .iter()
-                    .any(|s| s.uri.contains(".mp4"))
-                {
+                } else if pl.segments.iter().any(|s| s.uri.contains(".mp4")) {
                     MediaFormat::Mp4
                 } else {
                     MediaFormat::Ts

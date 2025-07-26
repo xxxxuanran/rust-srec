@@ -49,10 +49,15 @@ impl Pcm {
 
         let log2_min_pcm_luma_coding_block_size_minus3 = bit_reader.read_exp_golomb()?;
         let log2_min_ipcm_cb_size_y = log2_min_pcm_luma_coding_block_size_minus3 + 3;
-        range_check!(log2_min_ipcm_cb_size_y, min_cb_log2_size_y.min(5), ctb_log2_size_y.min(5))?;
+        range_check!(
+            log2_min_ipcm_cb_size_y,
+            min_cb_log2_size_y.min(5),
+            ctb_log2_size_y.min(5)
+        )?;
 
         let log2_diff_max_min_pcm_luma_coding_block_size = bit_reader.read_exp_golomb()?;
-        let log2_max_ipcm_cb_size_y = log2_diff_max_min_pcm_luma_coding_block_size + log2_min_ipcm_cb_size_y;
+        let log2_max_ipcm_cb_size_y =
+            log2_diff_max_min_pcm_luma_coding_block_size + log2_min_ipcm_cb_size_y;
         if log2_max_ipcm_cb_size_y > ctb_log2_size_y.min(5) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

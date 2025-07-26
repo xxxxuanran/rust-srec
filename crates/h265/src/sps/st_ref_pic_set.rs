@@ -85,10 +85,14 @@ impl ShortTermRefPicSets {
 
                 // Calculate derived values as defined as (7-61) and (7-62) by the spec
                 let mut i = 0;
-                if let Some(start) = num_positive_pics[ref_rps_idx].checked_sub(1).map(|s| s as usize) {
+                if let Some(start) = num_positive_pics[ref_rps_idx]
+                    .checked_sub(1)
+                    .map(|s| s as usize)
+                {
                     for j in (0..=start).rev() {
                         let d_poc = delta_poc_s1[ref_rps_idx][j] + delta_rps;
-                        if d_poc < 0 && use_delta_flag[num_negative_pics[ref_rps_idx] as usize + j] {
+                        if d_poc < 0 && use_delta_flag[num_negative_pics[ref_rps_idx] as usize + j]
+                        {
                             delta_poc_s0[st_rps_idx][i] = d_poc;
                             used_by_curr_pic_s0[st_rps_idx][i] =
                                 used_by_curr_pic_flag[num_negative_pics[ref_rps_idx] as usize + j];
@@ -99,7 +103,8 @@ impl ShortTermRefPicSets {
 
                 if delta_rps < 0 && use_delta_flag[num_delta_pocs[ref_rps_idx] as usize] {
                     delta_poc_s0[st_rps_idx][i] = delta_rps;
-                    used_by_curr_pic_s0[st_rps_idx][i] = used_by_curr_pic_flag[num_delta_pocs[ref_rps_idx] as usize];
+                    used_by_curr_pic_s0[st_rps_idx][i] =
+                        used_by_curr_pic_flag[num_delta_pocs[ref_rps_idx] as usize];
                     i += 1;
                 }
 
@@ -120,7 +125,10 @@ impl ShortTermRefPicSets {
                 range_check!(num_negative_pics[st_rps_idx], 0, 16)?;
 
                 i = 0;
-                if let Some(start) = num_negative_pics[ref_rps_idx].checked_sub(1).map(|s| s as usize) {
+                if let Some(start) = num_negative_pics[ref_rps_idx]
+                    .checked_sub(1)
+                    .map(|s| s as usize)
+                {
                     for j in (0..=start).rev() {
                         let d_poc = delta_poc_s0[ref_rps_idx][j] + delta_rps;
                         if d_poc > 0 && use_delta_flag[j] {
@@ -133,7 +141,8 @@ impl ShortTermRefPicSets {
 
                 if delta_rps > 0 && use_delta_flag[num_delta_pocs[ref_rps_idx] as usize] {
                     delta_poc_s1[st_rps_idx][i] = delta_rps;
-                    used_by_curr_pic_s1[st_rps_idx][i] = used_by_curr_pic_flag[num_delta_pocs[ref_rps_idx] as usize];
+                    used_by_curr_pic_s1[st_rps_idx][i] =
+                        used_by_curr_pic_flag[num_delta_pocs[ref_rps_idx] as usize];
                     i += 1;
                 }
 
@@ -185,7 +194,8 @@ impl ShortTermRefPicSets {
                         delta_poc_s0[st_rps_idx][i] = -(delta_poc_s0_minus1 as i64 + 1);
                     } else {
                         // (7-69)
-                        delta_poc_s0[st_rps_idx][i] = delta_poc_s0[st_rps_idx][i - 1] - (delta_poc_s0_minus1 as i64 + 1);
+                        delta_poc_s0[st_rps_idx][i] =
+                            delta_poc_s0[st_rps_idx][i - 1] - (delta_poc_s0_minus1 as i64 + 1);
                     }
 
                     let used_by_curr_pic_s0_flag = bit_reader.read_bit()?;
@@ -203,7 +213,8 @@ impl ShortTermRefPicSets {
                         delta_poc_s1[st_rps_idx][i] = delta_poc_s1_minus1 as i64 + 1;
                     } else {
                         // (7-70)
-                        delta_poc_s1[st_rps_idx][i] = delta_poc_s1[st_rps_idx][i - 1] + delta_poc_s1_minus1 as i64 + 1;
+                        delta_poc_s1[st_rps_idx][i] =
+                            delta_poc_s1[st_rps_idx][i - 1] + delta_poc_s1_minus1 as i64 + 1;
                     }
 
                     let used_by_curr_pic_s1_flag = bit_reader.read_bit()?;
