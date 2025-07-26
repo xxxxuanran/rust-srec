@@ -60,6 +60,9 @@ strev extract --url "https://twitch.tv/example_channel" --output-file result.jso
 
 # Exclude extra metadata
 strev extract --url "https://twitch.tv/example_channel" --no-extras
+
+# Pass custom extras as a JSON string
+strev extract --url "https://twitch.tv/example_channel" --extras '{"key": "value", "another_key": 123}'
 ```
 
 ### Batch Processing
