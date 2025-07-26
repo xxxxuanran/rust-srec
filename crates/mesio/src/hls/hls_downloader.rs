@@ -46,15 +46,14 @@ impl HlsDownloader {
         cache_manager: Option<Arc<CacheManager>>,
     ) -> Result<BoxMediaStream<HlsData, HlsDownloaderError>, DownloadError> {
         let config = Arc::new(self.config.clone());
-        let coordinator = HlsStreamCoordinator::setup_and_spawn(
+        let (client_event_rx, _shutdown_tx, _handles) = HlsStreamCoordinator::setup_and_spawn(
             url.to_string(),
             config.clone(),
             self.client.clone(),
             cache_manager,
         )
-        .await;
-
-        let (client_event_rx, _shutdown_tx, _handles) = coordinator.unwrap();
+        .await
+        .map_err(|e| DownloadError::HlsError(e))?;
 
         let stream = ReceiverStream::new(client_event_rx);
 
