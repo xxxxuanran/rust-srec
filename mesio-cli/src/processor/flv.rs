@@ -80,6 +80,8 @@ pub async fn process_file(
         .map_err(flv_error_to_pipeline_error);
 
     let (tags_written, files_created) = if config.enable_processing {
+         // we need to expand base_name with %i for output file numbering
+    let base_name = format!("{base_name}_p%i");
         process_stream::<FlvPipelineConfig, FlvData, FlvPipeline, FlvWriter, _, _>(
             &config.pipeline_config,
             config.flv_pipeline_config.clone(),
