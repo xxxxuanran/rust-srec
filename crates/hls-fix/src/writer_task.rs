@@ -130,12 +130,12 @@ impl FormatStrategy<HlsData> for HlsFormatStrategy {
     }
 
     fn next_file_path(&self, config: &WriterConfig, state: &WriterState) -> PathBuf {
-        let filename =
-            expand_filename_template(&config.file_name_template, Some(state.file_sequence_number));
-        let path = config.base_path.join(filename);
-        let new_path = path.with_extension(&config.file_extension);
-        debug!("Next file path: {}", new_path.display());
-        new_path
+        let sequence = state.file_sequence_number;
+
+        let file_name = expand_filename_template(&config.file_name_template, Some(sequence));
+        config
+            .base_path
+            .join(format!("{}.{}", file_name, config.file_extension))
     }
 
     fn on_file_open(
