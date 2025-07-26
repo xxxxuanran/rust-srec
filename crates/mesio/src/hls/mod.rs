@@ -12,6 +12,7 @@ pub mod playlist;
 pub mod processor;
 pub mod scheduler;
 pub(crate) mod segment_utils;
+pub mod twitch_processor;
 
 // Re-exports for easier access
 pub use config::HlsConfig;

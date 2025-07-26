@@ -5,10 +5,13 @@ use crate::cache::{CacheKey, CacheMetadata, CacheResourceType};
 use crate::hls::HlsDownloaderError;
 use crate::hls::config::{HlsConfig, HlsVariantSelectionPolicy};
 use crate::hls::scheduler::ScheduledSegmentJob;
+use crate::hls::twitch_processor::{ProcessedSegment, TwitchPlaylistProcessor};
 use async_trait::async_trait;
 use m3u8_rs::{MasterPlaylist, MediaPlaylist, parse_playlist_res};
 use moka::future::Cache;
+use moka::policy::EvictionPolicy;
 use reqwest::Client;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -75,11 +78,15 @@ impl PlaylistProvider for PlaylistEngine {
 
         if let Some(cache_service) = &self.cache_service {
             if let Some(cached_data) = cache_service.get(&cache_key).await? {
-                let playlist_content = String::from_utf8(cached_data.0.to_vec()).map_err(|e| {
-                    HlsDownloaderError::PlaylistError(format!(
-                        "Failed to parse cached playlist from UTF-8: {e}"
-                    ))
-                })?;
+                let mut playlist_content =
+                    String::from_utf8(cached_data.0.to_vec()).map_err(|e| {
+                        HlsDownloaderError::PlaylistError(format!(
+                            "Failed to parse cached playlist from UTF-8: {e}"
+                        ))
+                    })?;
+                if TwitchPlaylistProcessor::is_twitch_playlist(playlist_url.as_str()) {
+                    playlist_content = self.preprocess_twitch_playlist(&playlist_content);
+                }
                 let base_url_obj = playlist_url.join(".").map_err(|e| {
                     HlsDownloaderError::PlaylistError(format!("Failed to determine base URL: {e}"))
                 })?;
@@ -128,9 +135,12 @@ impl PlaylistProvider for PlaylistEngine {
                 .put(cache_key, playlist_bytes.clone(), metadata)
                 .await?;
         }
-        let playlist_content = String::from_utf8(playlist_bytes.to_vec()).map_err(|e| {
+        let mut playlist_content = String::from_utf8(playlist_bytes.to_vec()).map_err(|e| {
             HlsDownloaderError::PlaylistError(format!("Playlist content is not valid UTF-8: {e}"))
         })?;
+        if TwitchPlaylistProcessor::is_twitch_playlist(playlist_url.as_str()) {
+            playlist_content = self.preprocess_twitch_playlist(&playlist_content);
+        }
         let base_url_obj = playlist_url.join(".").map_err(|e| {
             HlsDownloaderError::PlaylistError(format!("Failed to determine base URL: {e}"))
         })?;
@@ -260,9 +270,12 @@ impl PlaylistProvider for PlaylistEngine {
                 .map_err(|e| HlsDownloaderError::NetworkError {
                     source: Arc::new(e),
                 })?;
-        let playlist_content = String::from_utf8(playlist_bytes.to_vec()).map_err(|e| {
+        let mut playlist_content = String::from_utf8(playlist_bytes.to_vec()).map_err(|e| {
             HlsDownloaderError::PlaylistError(format!("Media playlist not UTF-8: {e}"))
         })?;
+        if TwitchPlaylistProcessor::is_twitch_playlist(media_playlist_url.as_str()) {
+            playlist_content = self.preprocess_twitch_playlist(&playlist_content);
+        }
         let base_url_obj = media_playlist_url.join(".").map_err(|e| {
             HlsDownloaderError::PlaylistError(format!("Bad base URL for media playlist: {e}"))
         })?;
@@ -296,15 +309,22 @@ impl PlaylistProvider for PlaylistEngine {
             ))
         })?;
 
+        let mut last_map_uri: Option<String> = None;
+        let mut retries = 0;
+
+        // TODO: find a better way to inject processor
+        let mut twitch_processor = if base_url.contains("ttvnw.net") {
+            Some(TwitchPlaylistProcessor::new())
+        } else {
+            None
+        };
+
         /// The LRU cache capacity for seen segments.
-        const SEEN_SEGMENTS_LRU_CAPACITY: usize = 20;
+        const SEEN_SEGMENTS_LRU_CAPACITY: usize = 30;
         let seen_segment_uris: Cache<String, ()> = Cache::builder()
             .max_capacity(SEEN_SEGMENTS_LRU_CAPACITY as u64)
+            .eviction_policy(EvictionPolicy::lru())
             .build();
-
-        let mut last_map_uri: Option<String> = None;
-
-        let mut retries = 0;
 
         loop {
             let response_result = self
@@ -346,11 +366,37 @@ impl PlaylistProvider for PlaylistEngine {
                         }
                     };
 
-                    match parse_playlist_res(playlist_bytes.as_ref()) {
+                    let playlist_bytes_to_parse: Cow<[u8]> =
+                        if TwitchPlaylistProcessor::is_twitch_playlist(playlist_url.as_str()) {
+                            let playlist_content = String::from_utf8_lossy(&playlist_bytes);
+                            let preprocessed = self.preprocess_twitch_playlist(&playlist_content);
+                            Cow::Owned(preprocessed.into_bytes())
+                        } else {
+                            Cow::Borrowed(&playlist_bytes)
+                        };
+                    let new_playlist_result = parse_playlist_res(&playlist_bytes_to_parse);
+                    match new_playlist_result {
                         Ok(m3u8_rs::Playlist::MediaPlaylist(new_mp)) => {
                             let mut jobs_to_send = Vec::new();
 
-                            for (idx, segment) in new_mp.segments.iter().enumerate() {
+                            let processed_segments = if let Some(processor) = &mut twitch_processor
+                            {
+                                processor.process_playlist(&new_mp)
+                            } else {
+                                new_mp
+                                    .segments
+                                    .iter()
+                                    .map(|s| ProcessedSegment {
+                                        segment: s.clone(),
+                                        is_ad: false,
+                                    })
+                                    .collect()
+                            };
+
+                            for (idx, processed_segment) in
+                                processed_segments.into_iter().enumerate()
+                            {
+                                let segment = processed_segment.segment;
                                 if let Some(map_info) = &segment.map {
                                     let absolute_map_uri = if map_info.uri.starts_with("http://")
                                         || map_info.uri.starts_with("https://")
@@ -415,6 +461,11 @@ impl PlaylistProvider for PlaylistEngine {
                                 };
 
                                 if !seen_segment_uris.contains_key(&absolute_segment_uri) {
+                                    if processed_segment.is_ad {
+                                        debug!("Skipping Twitch ad segment: {}", segment.uri);
+                                        continue;
+                                    }
+
                                     seen_segment_uris
                                         .insert(absolute_segment_uri.clone(), ())
                                         .await;
@@ -514,5 +565,29 @@ impl PlaylistEngine {
             cache_service,
             config,
         }
+    }
+
+    /// Removes Twitch ad-related EXT-X-DATERANGE tags from the playlist and transforms
+    /// EXT-X-TWITCH-PREFETCH tags into standard segments.
+    fn preprocess_twitch_playlist(&self, playlist_content: &str) -> String {
+        let mut out = String::with_capacity(playlist_content.len());
+        for line in playlist_content.lines() {
+            if line.starts_with("#EXT-X-DATERANGE")
+                && (line.contains("twitch-stitched-ad") || line.contains("stitched-ad-"))
+            {
+                // skip ad tag
+            } else if let Some(prefetch_uri) = line.strip_prefix("#EXT-X-TWITCH-PREFETCH:") {
+                trace!("Transformed prefetch tag to segment: {}", prefetch_uri);
+                // The duration is not provided, so we use a common value.
+                // The title is used as a heuristic to identify the segment as an ad later.
+                out.push_str("#EXTINF:2.002,PREFETCH_SEGMENT\n");
+                out.push_str(prefetch_uri);
+                out.push('\n');
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
     }
 }
