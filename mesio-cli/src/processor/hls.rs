@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::processor::generic::process_stream;
+use crate::utils::expand_name_url;
 use crate::{config::ProgramConfig, utils::create_dirs};
 use futures::{StreamExt, stream};
 use hls::HlsData;
@@ -24,22 +25,7 @@ pub async fn process_hls_stream(
 
     let start_time = Instant::now();
 
-    // Extract name from URL
-    let url = url_str
-        .parse::<reqwest::Url>()
-        .map_err(|e| AppError::InvalidInput(e.to_string()))?;
-    let file_name = url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .unwrap_or("playlist")
-        .to_string();
-
-    // Remove any file extension
-    let base_name = match file_name.rfind('.') {
-        Some(pos) => file_name[..pos].to_string(),
-        None => file_name,
-    };
-    let base_name = name_template.replace("%u", &base_name);
+    let base_name = expand_name_url(name_template, url_str)?;
     downloader.add_source(url_str, 10);
 
     // Start the download

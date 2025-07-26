@@ -1,7 +1,7 @@
 use crate::config::ProgramConfig;
 use crate::error::AppError;
 use crate::processor::generic::process_stream;
-use crate::utils::{create_dirs, format_bytes};
+use crate::utils::{create_dirs, expand_name_url, format_bytes};
 use flv::data::FlvData;
 use flv::parser_async::FlvDecoderStream;
 use flv_fix::writer::FlvWriter;
@@ -58,6 +58,7 @@ pub async fn process_file(
     config: &ProgramConfig,
     on_progress: Option<OnProgress>,
 ) -> Result<(), AppError> {
+    // Create output directory if it doesn't exist
     create_dirs(output_dir).await?;
 
     let base_name = input_path
@@ -126,25 +127,13 @@ pub async fn process_flv_stream(
     on_progress: Option<OnProgress>,
     downloader: &mut DownloaderInstance,
 ) -> Result<u64, AppError> {
+    // Create output directory if it doesn't exist
+    create_dirs(output_dir).await?;
+
     let start_time = Instant::now();
-    tokio::fs::create_dir_all(output_dir).await?;
 
-    let url_name = {
-        let url = url_str
-            .parse::<reqwest::Url>()
-            .map_err(|e| AppError::InvalidInput(e.to_string()))?;
-        let file_name = url
-            .path_segments()
-            .and_then(|mut s| s.next_back())
-            .unwrap_or("stream")
-            .to_string();
-        match file_name.rfind('.') {
-            Some(pos) => file_name[..pos].to_string(),
-            None => file_name,
-        }
-    };
-
-    let base_name = name_template.replace("%u", &url_name);
+    // Expand the name template with the URL filename
+    let base_name = expand_name_url(name_template, url_str)?;
     downloader.add_source(url_str, 0);
 
     let stream = match downloader {
