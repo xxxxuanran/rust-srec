@@ -221,16 +221,16 @@ pub struct CliArgs {
     /// Force IPv4
     #[arg(
         short = '4',
-        long = "ipv4",
-        help = "Force IPv4 for downloads"
+        long,
+        help = "Force IPv4 for network connections (mutually exclusive with --ipv6)"
     )]
-    pub force_ipv4: bool,
+    pub ipv4: bool,
 
     /// Force IPv6
     #[arg(
         short = '6',
-        long = "ipv6",
-        help = "Force IPv6 for downloads"
+        long,
+        help = "Force IPv6 for network connections (mutually exclusive with --ipv4)"
     )]
-    pub force_ipv6: bool,
+    pub ipv6: bool,
 }

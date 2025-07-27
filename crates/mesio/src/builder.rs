@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use crate::{CacheConfig, DownloaderConfig, proxy::ProxyConfig};
+use crate::{CacheConfig, DownloaderConfig, config::IpVersion, proxy::ProxyConfig};
 
 /// Builder for creating DownloaderConfig instances with a fluent API
 #[derive(Debug, Clone)]
@@ -141,15 +141,11 @@ impl DownloaderConfigBuilder {
         self
     }
 
-    /// Set whether to force IPv4
-    pub fn with_force_ipv4(mut self) -> Self {
-        self.config.force_ipv4 = true;
-        self
-    }
-
-    /// Set whether to force IPv6
-    pub fn with_force_ipv6(mut self) -> Self {
-        self.config.force_ipv6 = true;
+    /// Set the IP version for network connections
+    ///
+    /// Forces all connections to use the specified IP version (IPv4 or IPv6)
+    pub fn with_ip_version(mut self, ip_version: IpVersion) -> Self {
+        self.config.ip_version = Some(ip_version);
         self
     }
 

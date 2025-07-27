@@ -1,7 +1,6 @@
 use reqwest::Client;
 use rustls::{ClientConfig, crypto::ring};
 use rustls_platform_verifier::BuilderVerifierExt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -36,11 +35,9 @@ pub fn create_client(config: &DownloaderConfig) -> Result<Client, DownloadError>
         });
 
     // Force IP Version
-    client_builder = match (config.force_ipv4, config.force_ipv6) {
-        (true, false) => client_builder.local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-        (false, true) => client_builder.local_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
-        _ => client_builder,
-    };
+    if let Some(ip_version) = config.ip_version {
+        client_builder = client_builder.local_address(ip_version.to_unspecified_addr());
+    }
 
     if !config.timeout.is_zero() {
         client_builder = client_builder.timeout(config.timeout);

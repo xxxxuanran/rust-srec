@@ -1,10 +1,35 @@
 use std::time::Duration;
-
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::{CacheConfig, proxy::ProxyConfig};
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// IP version preference for network connections
+///
+/// This enum is used to specify which IP version should be used for network connections:
+/// - `V4`: Force IPv4 connections
+/// - `V6`: Force IPv6 connections
+pub enum IpVersion {
+    /// Force IPv4 connections
+    V4,
+    /// Force IPv6 connections
+    V6,
+}
+
+impl IpVersion {
+    /// Converts the IP version preference to an unspecified IP address
+    ///
+    /// Returns an unspecified IP address for the selected version
+    pub fn to_unspecified_addr(&self) -> IpAddr {
+        match self {
+            Self::V4 => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            Self::V6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        }
+    }
+}
 
 /// Configurable options for the downloader
 #[derive(Debug, Clone)]
@@ -41,9 +66,8 @@ pub struct DownloaderConfig {
 
     pub danger_accept_invalid_certs: bool, // For reqwest's `danger_accept_invalid_certs`
 
-    pub force_ipv4: bool,
-
-    pub force_ipv6: bool,
+    // Use reqwest's `local_address` to force IP version
+    pub ip_version: Option<IpVersion>,
 }
 
 impl Default for DownloaderConfig {
@@ -60,8 +84,7 @@ impl Default for DownloaderConfig {
             proxy: None,
             use_system_proxy: true, // Enable system proxy by default
             danger_accept_invalid_certs: false, // Default to not accepting invalid certs
-            force_ipv4: false,
-            force_ipv6: false,
+            ip_version: None,
         }
     }
 }
@@ -94,8 +117,7 @@ impl DownloaderConfig {
             proxy: config.proxy,
             use_system_proxy: config.use_system_proxy,
             danger_accept_invalid_certs: config.danger_accept_invalid_certs,
-            force_ipv4: config.force_ipv4,
-            force_ipv6: config.force_ipv6,
+            ip_version: config.ip_version,
         }
     }
 

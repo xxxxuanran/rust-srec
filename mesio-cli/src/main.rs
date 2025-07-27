@@ -9,7 +9,7 @@ use flv_fix::ScriptFillerConfig;
 use hls_fix::HlsPipelineConfig;
 use indicatif::MultiProgress;
 use mesio_engine::flv::FlvConfig;
-use mesio_engine::{DownloaderConfig, HlsProtocolBuilder, ProxyAuth, ProxyConfig, ProxyType};
+use mesio_engine::{config::IpVersion, DownloaderConfig, HlsProtocolBuilder, ProxyAuth, ProxyConfig, ProxyType};
 use pipeline_common::config::PipelineConfig;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
@@ -198,10 +198,17 @@ async fn bootstrap() -> Result<(), AppError> {
             .with_headers(crate::utils::parse_headers(&args.headers))
             .with_caching_enabled(false);
 
-        builder = match (args.force_ipv4, args.force_ipv6) {
-            (true, false) => builder.with_force_ipv4(),
-            (false, true) => builder.with_force_ipv6(),
-            _ => builder,
+        // 设置 IP 版本
+        builder = match (args.ipv4, args.ipv6) {
+            (true, false) => {
+                info!("Using IPv4 for network connections");
+                builder.with_ip_version(IpVersion::V4)
+            },
+            (false, true) => {
+                info!("Using IPv6 for network connections");
+                builder.with_ip_version(IpVersion::V6)
+            },
+            _ => builder, // 使用系统默认设置
         };
 
         if let Some(proxy) = proxy_config {
