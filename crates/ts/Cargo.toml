@@ -8,8 +8,14 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2.0"
+bytes = "1.10.1"
+memchr = "2.7.5"
 
-[[example]]
-name = "zero_copy_demo"
-path = "examples/zero_copy_demo.rs"
+[dev-dependencies]
+criterion = "0.7.0"
+
+[[bench]]
+name = "parser_benchmark"
+harness = false
+
 
