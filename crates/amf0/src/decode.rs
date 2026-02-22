@@ -3,6 +3,20 @@ use std::io;
 
 use super::{Amf0Marker, Amf0ReadError, Amf0Value};
 
+/// Result of lossy decoding that may skip over invalid bytes.
+///
+/// When using [`Amf0Decoder::decode_all_lossy`], the decoder will attempt to
+/// recover from certain errors by skipping unknown or unsupported marker bytes
+/// and continuing to decode subsequent values.
+pub struct LossyDecodeResult<'a> {
+    /// Successfully decoded values.
+    pub values: Vec<Amf0Value<'a>>,
+    /// Total number of bytes skipped over during recovery.
+    pub bytes_skipped: usize,
+    /// The final non-recoverable error, if any (e.g., EOF or UTF-8 error).
+    pub error: Option<Amf0ReadError>,
+}
+
 /// An AMF0 Decoder.
 ///
 /// This decoder takes a reference to a byte slice and reads the AMF0 data from
@@ -89,6 +103,60 @@ impl<'a> Amf0Decoder<'a> {
         }
 
         (results, None)
+    }
+
+    /// Read all encoded values, skipping over invalid bytes when possible.
+    ///
+    /// Unlike [`decode_all`](Self::decode_all), this method attempts to recover
+    /// from recoverable errors (unknown or unsupported marker bytes) by skipping
+    /// past them and retrying. It gives up after `max_consecutive_skip`
+    /// consecutive bad bytes without a successful decode.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_consecutive_skip` - Maximum number of consecutive bytes to skip
+    ///   before giving up. The counter resets after each successful decode.
+    pub fn decode_all_lossy(&mut self, max_consecutive_skip: usize) -> LossyDecodeResult<'a> {
+        let mut values = vec![];
+        let mut bytes_skipped: usize = 0;
+        let mut consecutive_skips: usize = 0;
+
+        while !self.is_empty() {
+            let saved_pos = self.pos;
+
+            match self.decode() {
+                Ok(value) => {
+                    values.push(value);
+                    consecutive_skips = 0;
+                }
+                Err(err) if err.is_recoverable() => {
+                    if consecutive_skips >= max_consecutive_skip {
+                        return LossyDecodeResult {
+                            values,
+                            bytes_skipped,
+                            error: Some(err),
+                        };
+                    }
+                    // Skip 1 byte past where this decode attempt started
+                    self.pos = saved_pos + 1;
+                    bytes_skipped += 1;
+                    consecutive_skips += 1;
+                }
+                Err(err) => {
+                    return LossyDecodeResult {
+                        values,
+                        bytes_skipped,
+                        error: Some(err),
+                    };
+                }
+            }
+        }
+
+        LossyDecodeResult {
+            values,
+            bytes_skipped,
+            error: None,
+        }
     }
 
     /// Read the next encoded value from the decoder.
@@ -531,5 +599,127 @@ mod tests {
             )
         );
         assert!(decoder.is_empty());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_skips_unknown_marker() {
+        // Number(1.0), invalid byte, Boolean(true)
+        let mut data = vec![0x00]; // Number marker
+        data.extend_from_slice(&1.0_f64.to_be_bytes());
+        data.push(0xFF); // Invalid marker
+        data.extend_from_slice(&[0x01, 0x01]); // Boolean true
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(64);
+
+        assert_eq!(result.values.len(), 2);
+        assert_eq!(result.values[0], Amf0Value::Number(1.0));
+        assert_eq!(result.values[1], Amf0Value::Boolean(true));
+        assert_eq!(result.bytes_skipped, 1);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_skips_multiple_bad_bytes() {
+        // Number(1.0), 3 invalid bytes, String("hi")
+        let mut data = vec![0x00]; // Number marker
+        data.extend_from_slice(&1.0_f64.to_be_bytes());
+        data.extend_from_slice(&[0xFF, 0xFE, 0xFD]); // 3 invalid markers
+        data.extend_from_slice(&[0x02, 0x00, 0x02]); // String marker, length 2
+        data.extend_from_slice(b"hi");
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(64);
+
+        assert_eq!(result.values.len(), 2);
+        assert_eq!(result.values[0], Amf0Value::Number(1.0));
+        assert_eq!(result.values[1], Amf0Value::String(Cow::Borrowed("hi")));
+        assert_eq!(result.bytes_skipped, 3);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_all_garbage() {
+        let data = vec![0xFF, 0xFE, 0xFD];
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(64);
+
+        assert!(result.values.is_empty());
+        assert_eq!(result.bytes_skipped, 3);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_exceeds_skip_budget() {
+        // 5 invalid bytes with budget of 2
+        let data = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(2);
+
+        assert!(result.values.is_empty());
+        assert_eq!(result.bytes_skipped, 2);
+        assert!(result.error.is_some());
+        assert!(matches!(
+            result.error,
+            Some(Amf0ReadError::UnknownMarker(_))
+        ));
+    }
+
+    #[test]
+    fn test_decode_all_lossy_resets_skip_counter() {
+        // bad byte, Boolean(true), 2 bad bytes, Number(42.0)
+        // with budget of 2 — should succeed because counter resets after Boolean
+        let mut data = vec![0xFF]; // 1 bad byte
+        data.extend_from_slice(&[0x01, 0x01]); // Boolean true
+        data.extend_from_slice(&[0xFE, 0xFD]); // 2 bad bytes
+        data.push(0x00); // Number marker
+        data.extend_from_slice(&42.0_f64.to_be_bytes());
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(2);
+
+        assert_eq!(result.values.len(), 2);
+        assert_eq!(result.values[0], Amf0Value::Boolean(true));
+        assert_eq!(result.values[1], Amf0Value::Number(42.0));
+        assert_eq!(result.bytes_skipped, 3);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_skips_unsupported_type() {
+        // UnsupportedType is a valid marker (0x0d) but not handled by decode()
+        // The lossy decoder should skip past it
+        let mut data = vec![0x01, 0x01]; // Boolean true
+        data.push(0x0d); // Unsupported marker (valid AMF0 marker, but decode returns UnsupportedType)
+        data.push(0x05); // Null
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(64);
+
+        assert_eq!(result.values.len(), 2);
+        assert_eq!(result.values[0], Amf0Value::Boolean(true));
+        assert_eq!(result.values[1], Amf0Value::Null);
+        assert_eq!(result.bytes_skipped, 1);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_decode_all_lossy_stops_on_io_error() {
+        // Truncated number: marker present but not enough bytes for f64 body
+        // This is a non-recoverable IO error — lossy decoder should stop
+        let mut data = vec![0x01, 0x01]; // Boolean true
+        data.push(0x00); // Number marker
+        data.extend_from_slice(&[0x40, 0x59]); // Only 2 of 8 bytes for f64
+
+        let mut decoder = Amf0Decoder::new(&data);
+        let result = decoder.decode_all_lossy(64);
+
+        assert_eq!(result.values.len(), 1);
+        assert_eq!(result.values[0], Amf0Value::Boolean(true));
+        assert_eq!(result.bytes_skipped, 0);
+        assert!(result.error.is_some());
+        assert!(matches!(result.error, Some(Amf0ReadError::Io(_))));
     }
 }

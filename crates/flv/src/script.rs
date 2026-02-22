@@ -105,11 +105,18 @@ impl ScriptData {
             }
         };
 
-        let (data, error) = amf0_reader.decode_all();
+        let result = amf0_reader.decode_all_lossy(64);
+
+        if result.bytes_skipped > 0 {
+            warn!(
+                "Skipped {} bytes of invalid AMF0 data during script parsing",
+                result.bytes_skipped
+            );
+        }
 
         // Handle any parsing error
-        if let Some(err) = error {
-            if data.is_empty() {
+        if let Some(err) = result.error {
+            if result.values.is_empty() {
                 // If data is empty and we have an error, return the error
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -123,7 +130,7 @@ impl ScriptData {
 
         Ok(Self {
             name: name.into_owned(),
-            data: data.into_iter().map(|v| v.into_owned()).collect(),
+            data: result.values.into_iter().map(|v| v.into_owned()).collect(),
         })
     }
 }

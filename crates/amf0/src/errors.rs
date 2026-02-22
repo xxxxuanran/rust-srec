@@ -29,6 +29,16 @@ pub enum Amf0ReadError {
     },
 }
 
+impl Amf0ReadError {
+    /// Whether this error can be recovered from by skipping bytes.
+    ///
+    /// Recoverable errors are those where the decoder position is known
+    /// and we can safely skip forward to try finding the next valid value.
+    pub fn is_recoverable(&self) -> bool {
+        matches!(self, Self::UnknownMarker(_) | Self::UnsupportedType(_))
+    }
+}
+
 /// Errors that can occur when encoding AMF0 data.
 #[derive(Debug, thiserror::Error)]
 pub enum Amf0WriteError {
