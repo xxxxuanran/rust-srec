@@ -219,6 +219,22 @@ where
         Ok(())
     }
 
+    /// Clears the `last_error` field for the streamer with the given `id`.
+    ///
+    /// Only `last_error` is cleared; `consecutive_error_count` and `disabled_until`
+    /// are left unchanged.
+    pub async fn clear_last_error(&self, id: &str) -> Result<()> {
+        debug!("Clearing last_error for streamer {}", id);
+
+        self.repo.clear_streamer_last_error(id).await?;
+
+        if let Some(mut entry) = self.metadata.get_mut(id) {
+            entry.last_error = None;
+        }
+
+        Ok(())
+    }
+
     /// Update streamer state.
     ///
     /// Persists to database first, then updates in-memory cache.
@@ -895,6 +911,10 @@ mod tests {
             Ok(())
         }
 
+        async fn clear_streamer_last_error(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn record_streamer_error(
             &self,
             _id: &str,
@@ -1133,6 +1153,30 @@ mod tests {
         assert_eq!(metadata.consecutive_error_count, 2);
         assert!(metadata.disabled_until.is_some());
         assert!(metadata.is_disabled());
+    }
+
+    #[tokio::test]
+    async fn test_clear_last_error_only_clears_last_error() {
+        let repo =
+            MockStreamerRepository::with_streamers(vec![create_test_db_model("s1", "twitch")]);
+        let broadcaster = ConfigEventBroadcaster::new();
+        let manager = StreamerManager::with_error_threshold(Arc::new(repo), broadcaster, 2);
+        manager.hydrate().await.unwrap();
+
+        // Record two errors so backoff is active and last_error is set
+        manager.record_error("s1", "Error 1").await.unwrap();
+        manager.record_error("s1", "Error 2").await.unwrap();
+        let before = manager.get_streamer("s1").unwrap();
+        assert_eq!(before.consecutive_error_count, 2);
+        assert!(before.disabled_until.is_some());
+        assert!(before.last_error.is_some());
+
+        // clear_last_error should only clear last_error
+        manager.clear_last_error("s1").await.unwrap();
+        let after = manager.get_streamer("s1").unwrap();
+        assert!(after.last_error.is_none());
+        assert_eq!(after.consecutive_error_count, before.consecutive_error_count);
+        assert_eq!(after.disabled_until, before.disabled_until);
     }
 
     #[tokio::test]
