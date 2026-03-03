@@ -22,6 +22,7 @@ pub mod writer_async;
 pub use data::FlvData;
 pub use error::FlvError;
 pub use header::FlvHeader;
+pub use pipeline_common::split_reason::{AudioCodecInfo, SplitReason, VideoCodecInfo};
 pub use tag::{FlvTag, FlvTagType};
 pub use writer::FlvWriter;
 pub use writer_async::FlvEncoder;
