@@ -1,3 +1,10 @@
+# Keep text files LF repo-wide to avoid Windows CRLF churn.
+* text=auto eol=lf
+
+# If Windows batch scripts are added later, keep them CRLF-friendly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # Keep GitHub Actions files LF so embedded bash snippets run cleanly on Linux runners.
 .github/** text eol=lf
 
