@@ -929,22 +929,20 @@ impl NotificationService {
                 event_log_id: Some(event_log_id.clone()),
             };
 
-            let send_result = self
-                .web_push_tx
-                .read()
-                .clone()
-                .map(|tx| tx.try_send(queued));
+            let web_push_tx = self.web_push_tx.read().clone();
 
-            match send_result {
-                Some(Ok(())) => {}
-                Some(Err(err)) => {
-                    warn!(error = %err, "Web push queue full/closed; falling back to detached send");
-                    let event = event.clone();
-                    let event_log_id = event_log_id.clone();
-                    tokio::spawn(async move {
-                        web_push.send_event(&event, Some(&event_log_id)).await;
-                    });
-                }
+            match web_push_tx {
+                Some(tx) => match tx.try_send(queued) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        warn!(error = %err, "Web push queue full/closed; falling back to detached send");
+                        let event = event.clone();
+                        let event_log_id = event_log_id.clone();
+                        tokio::spawn(async move {
+                            web_push.send_event(&event, Some(&event_log_id)).await;
+                        });
+                    }
+                },
                 None => {
                     let event = event.clone();
                     let event_log_id = event_log_id.clone();
