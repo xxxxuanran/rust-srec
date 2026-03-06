@@ -660,7 +660,7 @@ fn encrypt_aes128gcm(
     offset += PUBLIC_KEY_LEN;
     ikm_info[offset..offset + PUBLIC_KEY_LEN].copy_from_slice(&local_pub_raw);
 
-    let ikm = hkdf_sha256(auth_secret, shared_secret.as_slice(), &ikm_info, 32)?;
+    let ikm = hkdf_sha256(auth_secret, shared_secret, &ikm_info, 32)?;
     let cek = hkdf_sha256(&salt, &ikm, KEY_INFO.as_bytes(), 16)?;
     let nonce = hkdf_sha256(&salt, &ikm, NONCE_INFO.as_bytes(), 12)?;
 
@@ -725,7 +725,7 @@ fn build_vapid_jwt_with_exp(
     let signing_key = SigningKey::from_bytes(private_key_raw.into())
         .map_err(|_| Error::Other("Invalid VAPID private key".to_string()))?;
     let sig: p256::ecdsa::Signature = signing_key.sign(signing_input.as_bytes());
-    let sig_b64 = encode_b64url(sig.to_bytes().as_slice());
+    let sig_b64 = encode_b64url(&sig.to_bytes());
 
     Ok((format!("{}.{}", signing_input, sig_b64), exp_unix))
 }
