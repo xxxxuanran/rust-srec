@@ -87,7 +87,6 @@ export function DouyuConfigFields({ form, fieldName }: DouyuConfigFieldsProps) {
               )}
             />
           </div>
-
         </div>
       </section>
 

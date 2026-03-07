@@ -11,7 +11,8 @@ import {
   getPipelineJobLogs,
   getPipelineJobProgress,
   retryPipelineJob,
-  cancelPipelineJob,
+  cancelActivePipelineJob,
+  deletePipelineJob,
 } from '@/server/functions/pipeline';
 import { Button } from '@/components/ui/button';
 import {
@@ -195,18 +196,18 @@ function JobDetailsPage() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (id: string) => cancelPipelineJob({ data: id }),
+    mutationFn: (id: string) => cancelActivePipelineJob({ data: id }),
     onSuccess: () => {
-      toast.success(i18n._(msg`Job cancelled`));
+      toast.success(i18n._(msg`Job cancelled and removed`));
       void queryClient.invalidateQueries({
         queryKey: ['pipeline', 'job', jobId],
       });
     },
-    onError: () => toast.error(i18n._(msg`Failed to cancel job`)),
+    onError: () => toast.error(i18n._(msg`Failed to cancel and remove job`)),
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => cancelPipelineJob({ data: id }),
+    mutationFn: (id: string) => deletePipelineJob({ data: id }),
     onSuccess: () => {
       toast.success(i18n._(msg`Job deleted`));
       // Redirect to jobs list on deletion since the job no longer exists
@@ -395,7 +396,9 @@ function JobDetailsPage() {
                   onClick={() => {
                     if (
                       confirm(
-                        i18n._(msg`Are you sure you want to delete this job?`),
+                        i18n._(
+                          msg`Are you sure you want to delete this job? This will permanently remove it from your list.`,
+                        ),
                       )
                     ) {
                       deleteMutation.mutate(job.id);

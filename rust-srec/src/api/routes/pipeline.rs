@@ -20,7 +20,7 @@
 //! | GET | `/api/pipeline/jobs/{id}/logs` | List job execution logs (paged) |
 //! | GET | `/api/pipeline/jobs/{id}/progress` | Get latest job progress snapshot |
 //! | POST | `/api/pipeline/jobs/{id}/retry` | Retry a failed job |
-//! | DELETE | `/api/pipeline/jobs/{id}` | Cancel a pending or processing job |
+//! | DELETE | `/api/pipeline/jobs/{id}` | Cancel an active job, or delete a completed/failed job |
 //!
 //! ## Pipelines
 //!
@@ -114,7 +114,7 @@ pub fn router() -> Router<AppState> {
         .route("/jobs/{id}/logs", get(list_job_logs))
         .route("/jobs/{id}/progress", get(get_job_progress))
         .route("/jobs/{id}/retry", post(retry_job))
-        .route("/jobs/{id}", delete(cancel_job))
+        .route("/jobs/{id}", delete(cancel_or_delete_job))
         .route("/{pipeline_id}", delete(cancel_pipeline))
         .route("/outputs", get(list_outputs))
         .route("/stats", get(get_stats))
@@ -968,7 +968,7 @@ pub async fn retry_job(
     Ok(Json(job_to_response(&job, streamer_name)))
 }
 
-/// Cancel a pending or processing job.
+/// Cancel an active job, or delete a completed/failed job.
 ///
 /// # Endpoint
 ///
@@ -980,7 +980,7 @@ pub async fn retry_job(
 ///
 /// # Response
 ///
-/// Returns a success message on successful cancellation.
+/// Returns a success message on successful cancellation or deletion.
 ///
 /// ```json
 /// {
@@ -989,16 +989,21 @@ pub async fn retry_job(
 /// }
 /// ```
 ///
+/// For completed or failed jobs, the success message instead reports deletion.
+///
 /// # Errors
 ///
 /// - `404 Not Found` - Job with the specified ID does not exist
-/// - `400 Bad Request` - Job is in a terminal status (completed or failed)
+/// - `400 Bad Request` - Job could not be cancelled or deleted due to an invalid state transition
 ///
 /// # Behavior
 ///
 /// - For pending jobs: Removes from queue and marks as "interrupted"
 /// - For processing jobs: Signals cancellation to worker and marks as "interrupted"
-/// - For completed/failed jobs: Returns error (cannot cancel terminal jobs)
+/// - For interrupted jobs: Keeps the job in the interrupted state and re-signals cancellation if needed
+/// - For completed/failed jobs: Deletes the job record instead of returning a cancellation error
+///
+/// To delete an entire DAG execution, use `DELETE /api/pipeline/dag/{dag_id}/delete`.
 ///
 #[utoipa::path(
     delete,
@@ -1006,13 +1011,13 @@ pub async fn retry_job(
     tag = "pipeline",
     params(("id" = String, Path, description = "Job ID")),
     responses(
-        (status = 200, description = "Job cancelled", body = crate::api::openapi::MessageResponse),
-        (status = 400, description = "Cannot cancel completed job", body = crate::api::error::ApiErrorResponse),
+        (status = 200, description = "Job cancelled or deleted", body = crate::api::openapi::MessageResponse),
+        (status = 400, description = "Job could not be cancelled or deleted", body = crate::api::error::ApiErrorResponse),
         (status = 404, description = "Job not found", body = crate::api::error::ApiErrorResponse)
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn cancel_job(
+pub async fn cancel_or_delete_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
