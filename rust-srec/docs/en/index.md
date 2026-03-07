@@ -10,6 +10,9 @@ hero:
       text: Get Started
       link: /en/getting-started/
     - theme: alt
+      text: Release Notes
+      link: /en/release-notes/
+    - theme: alt
       text: View on GitHub
       link: https://github.com/hua0512/rust-srec
   image:
@@ -17,6 +20,9 @@ hero:
     alt: Rust-srec
 
 features:
+  - icon: 📝
+    title: Release Notes
+    details: Track version updates, behavior changes, compatibility notes, and upgrade guidance
   - icon: 🎬
     title: Multi-Platform Support
     details: Support for Bilibili, Douyin, Douyu, Huya, Twitch, TikTok, and more

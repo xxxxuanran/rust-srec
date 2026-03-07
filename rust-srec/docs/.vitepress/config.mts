@@ -49,6 +49,7 @@ export default defineConfig({
                     { text: 'Home', link: '/en/' },
                     { text: 'Getting Started', link: '/en/getting-started/' },
                     { text: 'API', link: '/en/api/' },
+                    { text: 'Release Notes', link: '/en/release-notes/' },
                     { text: 'Donate', link: '/en/donate' }
                 ],
                 sidebar: {
@@ -90,6 +91,13 @@ export default defineConfig({
                                 { text: 'DAG Pipeline', link: '/en/concepts/pipeline' },
                                 { text: 'Notification System', link: '/en/concepts/notifications' }
                             ]
+                        },
+                        {
+                            text: 'Release Notes',
+                            items: [
+                                { text: 'Overview', link: '/en/release-notes/' },
+                                { text: 'v0.2.1', link: '/en/release-notes/v0.2.1' }
+                            ]
                         }
                     ]
                 }
@@ -115,6 +123,7 @@ export default defineConfig({
                     { text: '首页', link: '/zh/' },
                     { text: '快速开始', link: '/zh/getting-started/' },
                     { text: 'API', link: '/zh/api/' },
+                    { text: '更新日志', link: '/zh/release-notes/' },
                     { text: '捐赠', link: '/zh/donate' }
                 ],
                 sidebar: {
@@ -155,6 +164,13 @@ export default defineConfig({
                                 { text: '配置层级', link: '/zh/concepts/configuration' },
                                 { text: 'DAG 管道', link: '/zh/concepts/pipeline' },
                                 { text: '通知系统', link: '/zh/concepts/notifications' }
+                            ]
+                        },
+                        {
+                            text: '更新日志',
+                            items: [
+                                { text: '概览', link: '/zh/release-notes/' },
+                                { text: 'v0.2.1', link: '/zh/release-notes/v0.2.1' }
                             ]
                         }
                     ]

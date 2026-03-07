@@ -483,6 +483,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -624,4 +625,4 @@ jobs:
         with:
           files: |
             publish/*
-          generate_release_notes: true
+          body_path: rust-srec/docs/release-notes-body.md

@@ -10,6 +10,9 @@ hero:
       text: 快速开始
       link: /zh/getting-started/
     - theme: alt
+      text: 更新日志
+      link: /zh/release-notes/
+    - theme: alt
       text: GitHub
       link: https://github.com/hua0512/rust-srec
   image:
@@ -17,6 +20,9 @@ hero:
     alt: Rust-srec
 
 features:
+  - icon: 📝
+    title: 更新日志
+    details: 查看版本更新、行为变更、兼容性说明与升级建议
   - icon: 🎬
     title: 多平台支持
     details: 支持 Bilibili、抖音、斗鱼、虎牙、Twitch、TikTok 等平台
