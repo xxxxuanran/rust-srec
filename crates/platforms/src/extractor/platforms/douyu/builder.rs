@@ -635,6 +635,7 @@ impl Douyu {
                 // Handle specific Douyu error codes
                 match resp.error {
                     -5 => {
+                        //  Room is closed / streamer is not live (error -5)
                         return Err(ExtractorError::ValidationError(format!(
                             "Room is closed / streamer is not live (error -5): {}",
                             resp.msg
@@ -876,7 +877,23 @@ impl Douyu {
         }
 
         // streamer is live
-        let streams = self.get_streams_with_stable_auth(rid, is_vip).await?;
+        let streams = match self.get_streams_with_stable_auth(rid, is_vip).await {
+            Ok(streams) => streams,
+            Err(ExtractorError::ValidationError(msg)) if msg.contains("error -5") => {
+                // Room went offline between status check and stream fetch
+                debug!("Room went offline during stream fetch: {}", msg);
+                return Ok(self.create_media_info(
+                    &title,
+                    &artist,
+                    cover_url,
+                    avatar_url,
+                    false,
+                    vec![],
+                    Some(rid),
+                ));
+            }
+            Err(e) => return Err(e),
+        };
 
         Ok(self.create_media_info(
             &title,
