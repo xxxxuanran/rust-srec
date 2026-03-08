@@ -2606,8 +2606,70 @@ fn topological_sort(dag: &DagPipelineDefinition) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use crate::database::models::DagStep;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::api::server::AppState;
+    use crate::pipeline::PipelineManager;
+
+    fn build_test_state() -> AppState {
+        let mut state = AppState::new();
+        state.pipeline_manager = Some(Arc::new(PipelineManager::new()));
+        state
+    }
+
+    async fn enqueue_job_with_status(status: QueueJobStatus) -> (AppState, String) {
+        let state = build_test_state();
+        let manager = state.pipeline_manager.as_ref().unwrap().clone();
+
+        let mut job = Job::new(
+            "remux",
+            vec!["input.mp4".to_string()],
+            vec!["output.mp4".to_string()],
+            "streamer-1",
+            "session-1",
+        );
+        job.status = status;
+
+        let job_id = manager.enqueue(job).await.unwrap();
+        (state, job_id)
+    }
+
+    #[tokio::test]
+    async fn test_cancel_or_delete_job_cancels_processing_job() {
+        let (state, job_id) = enqueue_job_with_status(QueueJobStatus::Processing).await;
+
+        let response = cancel_or_delete_job(State(state.clone()), Path(job_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.0["message"],
+            serde_json::Value::String(format!("Job '{}' cancelled successfully", job_id))
+        );
+
+        let manager = state.pipeline_manager.as_ref().unwrap();
+        let job = manager.get_job(&job_id).await.unwrap().unwrap();
+        assert_eq!(job.status, QueueJobStatus::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_or_delete_job_deletes_completed_job() {
+        let (state, job_id) = enqueue_job_with_status(QueueJobStatus::Completed).await;
+
+        let response = cancel_or_delete_job(State(state.clone()), Path(job_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.0["message"],
+            serde_json::Value::String(format!("Job '{}' deleted successfully", job_id))
+        );
+
+        let manager = state.pipeline_manager.as_ref().unwrap();
+        let job = manager.get_job(&job_id).await.unwrap();
+        assert!(job.is_none());
+    }
 
     #[test]
     fn test_pipeline_stats_response_serialization() {
